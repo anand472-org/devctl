@@ -131,8 +131,12 @@ fn dead_collector_does_not_fail_or_slow_the_command() {
     .timeout(Duration::from_secs(10))
     .assert()
     .success();
+    // Bounded by the worker's 5 s flush cap plus a margin, not by connect time: on Unix a closed
+    // loopback port refuses at once, but Windows retries the SYN (~2.2 s per connect), so the
+    // exporters use up the whole flush cap there. Git never waits on the worker; the hooks it
+    // does wait on have their own, much shorter caps.
     assert!(
-        start.elapsed() < Duration::from_secs(3),
+        start.elapsed() < Duration::from_secs(8),
         "took {:?}",
         start.elapsed()
     );
