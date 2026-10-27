@@ -257,7 +257,7 @@ fn record_error_blocks() {
     let head = f.t.commit("broken recipe");
     f.hook(&new_feature(&head))
         .failure()
-        .stdout(contains("BLOCK record: "))
+        .stdout(contains("BLOCK record: no JUnit output"))
         .stdout(contains("skip  tests: "))
         .stdout(contains(
             "push blocked for feature/x: fix the recipe, then run `devctl record`",
@@ -268,11 +268,19 @@ fn record_error_blocks() {
 fn compliant_push_passes() {
     let f = Fixture::new();
     let head = f.feature(&[]);
-    // git may set GIT_DIR for hooks; discovery still starts from the cwd.
+    // git may set repository variables for hooks; they must not redirect the
+    // gate (or the git and recipe processes it starts) to another repository
+    // or index.
+    let other = TestRepo::new();
+    other.commit("unrelated");
     let a = f
         .devctl()
         .args(["hook", "pre-push", "origin", &f.url])
-        .env("GIT_DIR", f.t.path().join(".git"))
+        .env("GIT_DIR", other.path().join(".git"))
+        .env(
+            "GIT_INDEX_FILE",
+            f.t.path().join("no-such-dir").join("index"),
+        )
         .write_stdin(new_feature(&head))
         .assert()
         .success()
@@ -425,5 +433,56 @@ fn hooks_not_in_this_build_fail() {
         .failure()
         .stderr(contains(
             "hook `post-commit` is not available in this build",
+        ));
+}
+
+#[test]
+fn lcov_outside_the_worktree_blocks() {
+    let f = Fixture::new();
+    f.t.checkout_new("feature/x");
+    f.t.write("src/a.rs", "a\nb\nc\nd\n");
+    // Every SF path points outside the worktree, so all are dropped.
+    f.t.write(
+        "fixture/cov.info",
+        "SF:../outside/a.rs\nDA:1,1\nend_of_record\n",
+    );
+    let head = f.t.commit("lcov elsewhere");
+    f.hook(&new_feature(&head))
+        .failure()
+        .stdout(contains("pass  record: "))
+        .stdout(contains(
+            "BLOCK new-code-coverage: the record's LCOV covers no files in this worktree",
+        ))
+        .stdout(contains("check the `coverage` recipe's SF paths"));
+}
+
+#[test]
+fn zero_raw_retention_still_passes() {
+    let f = Fixture::with(|t| t.write(".devctl.toml", "[retention]\nraw_reports_days = 0\n"));
+    let head = f.feature(&[]);
+    f.hook(&new_feature(&head))
+        .success()
+        .stdout(contains("pass  new-code-coverage: 3/3 new lines covered"));
+    assert_eq!(f.runs("feature-x"), 1, "recorded once");
+}
+
+#[test]
+fn push_to_a_url_uses_the_local_target_branch() {
+    let f = Fixture::new();
+    let head = f.feature(&[]);
+    // Only `origin/dev` is left as the target.
+    f.t.git(&["branch", "-q", "-D", "dev"]);
+    f.hook(&new_feature(&head))
+        .success()
+        .stdout(contains("pass  new-code-coverage: 3/3 new lines covered"));
+    // git passes the URL twice when the push target is a URL; a URL has no
+    // remote-tracking refs, so the local `dev` is the target, and it is gone.
+    f.devctl()
+        .args(["hook", "pre-push", &f.url, &f.url])
+        .write_stdin(new_feature(&head))
+        .assert()
+        .failure()
+        .stdout(contains(
+            "BLOCK new-code-coverage: target branch `dev` not found",
         ));
 }

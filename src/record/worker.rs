@@ -45,7 +45,9 @@ fn store_record(ctx: &Ctx, record: &Record, raw: Option<&RawReports>) -> Result<
             record.branch
         )
     })?;
-    if let Err(e) = store.prune(&retention(ctx), now_ms()) {
+    // Ages are measured from this record's finish, so its own raw reports
+    // survive even `raw_reports_days = 0` ("keep none" of the older ones).
+    if let Err(e) = store.prune(&retention(ctx), record.finished_at_ms) {
         tracing::warn!(error = %e, "cannot apply record retention");
     }
     Ok(id)

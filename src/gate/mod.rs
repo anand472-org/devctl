@@ -146,13 +146,48 @@ pub struct Waiting<'a> {
     pub progress: &'a dyn Fn(&str),
 }
 
-/// Applies every rule to `update`, pushed to `remote` (the remote's name, or
-/// its URL when pushing to a URL).
+/// Where a push goes, as git tells `pre-push`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Remote {
+    /// A configured remote (`origin`); its remote-tracking refs are used.
+    Name(String),
+    /// A URL or path pushed to directly; it has no remote-tracking refs.
+    Url(String),
+}
+
+impl Remote {
+    /// From `pre-push`'s arguments `<name> <url>`: git passes the URL as both
+    /// when the push target is a URL rather than a remote's name.
+    #[must_use]
+    pub fn from_hook_args(name: &str, url: Option<&str>) -> Remote {
+        if url == Some(name) {
+            Remote::Url(name.to_string())
+        } else {
+            Remote::Name(name.to_string())
+        }
+    }
+
+    /// The name or URL.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Remote::Name(s) | Remote::Url(s) => s,
+        }
+    }
+}
+
+impl fmt::Display for Remote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Applies every rule to `update`, pushed to `remote`.
 ///
 /// # Errors
 /// If git, the store or the record queue cannot be read; the gate fails
 /// closed, so callers must treat an error as a block.
-pub fn evaluate(ctx: &Ctx, remote: &str, update: &RefUpdate) -> Result<Vec<RuleResult>> {
+pub fn evaluate(ctx: &Ctx, remote: &Remote, update: &RefUpdate) -> Result<Vec<RuleResult>> {
     let progress = |line: &str| eprintln!("{line}");
     let minutes = u64::from(ctx.config.record.timeout_minutes);
     let waiting = Waiting {
@@ -231,7 +266,7 @@ fn skip_rest(out: &mut Vec<RuleResult>, detail: &str) -> Result<()> {
 /// As [`evaluate`].
 pub fn evaluate_with(
     ctx: &Ctx,
-    remote: &str,
+    remote: &Remote,
     update: &RefUpdate,
     waiting: &Waiting,
 ) -> Result<Vec<RuleResult>> {
@@ -282,7 +317,7 @@ pub fn evaluate_with(
             Ok(pass(Rule::NoDelete, "not a deletion"))
         })?);
         out.push(checked(Rule::NoRewrite, || {
-            no_rewrite(ctx, remote, branch, local, remote_id, remote_known)
+            no_rewrite(ctx, remote.as_str(), branch, local, remote_id, remote_known)
         })?);
         out.push(checked(Rule::Linear, || {
             linear(ctx, local, remote_id, remote_known)
@@ -506,15 +541,15 @@ fn record_rule(
             let (record, raw) = *found;
             match &record.status {
                 Status::Error { stderr_tail } => {
-                    let first = stderr_tail
+                    let last = stderr_tail
                         .lines()
                         .map(str::trim)
-                        .find(|l| !l.is_empty())
+                        .rfind(|l| !l.is_empty())
                         .unwrap_or("(no output)");
                     (
                         block(
                             Rule::Record,
-                            first,
+                            last,
                             "fix the recipe, then run `devctl record`",
                         ),
                         None,
@@ -559,16 +594,10 @@ fn tests_rule(record: &Record) -> RuleResult {
     }
 }
 
-/// Whether `remote` is a remote's name rather than a URL or path (git passes
-/// the URL when pushing to one directly).
-fn is_remote_name(remote: &str) -> bool {
-    !remote.is_empty() && !remote.contains([':', '\\']) && !remote.starts_with(['/', '.', '~'])
-}
-
-/// The commit of `target`: its remote-tracking ref on `remote`, else the local
-/// branch.
-fn target_commit(ctx: &Ctx, remote: &str, target: &str) -> Result<Option<ObjectId>> {
-    if is_remote_name(remote)
+/// The commit of `target`: its remote-tracking ref on a named `remote`, else
+/// the local branch.
+fn target_commit(ctx: &Ctx, remote: &Remote, target: &str) -> Result<Option<ObjectId>> {
+    if let Remote::Name(remote) = remote
         && let Some(id) = ctx
             .repo
             .ref_target(&format!("refs/remotes/{remote}/{target}"))?
@@ -580,7 +609,7 @@ fn target_commit(ctx: &Ctx, remote: &str, target: &str) -> Result<Option<ObjectI
 
 fn coverage_rule(
     ctx: &Ctx,
-    remote: &str,
+    remote: &Remote,
     branch: &str,
     protected: bool,
     local: ObjectId,
@@ -617,6 +646,16 @@ fn coverage_rule(
              `devctl record --commit {id}`"
         )
     })?;
+    if report.files.is_empty() && !added.is_empty() {
+        // Every SF path was dropped as outside the worktree: nothing would
+        // ever count as coverable.
+        return Ok(block(
+            RULE,
+            "the record's LCOV covers no files in this worktree",
+            "check the `coverage` recipe's SF paths (they must point inside the worktree), \
+             then run `devctl record`",
+        ));
+    }
     let n = new_code(&added, &report);
     let threshold = ctx.config.gate.new_code_coverage;
     let detail = if n.coverable == 0 {
@@ -711,7 +750,7 @@ pub fn run_gate(ctx: &Ctx, target: Option<&str>) -> Result<GateReport> {
             .repo
             .ref_target(&format!("refs/remotes/{REMOTE}/{target}"))?,
     };
-    let results = evaluate(ctx, REMOTE, &update)?;
+    let results = evaluate(ctx, &Remote::Name(REMOTE.to_string()), &update)?;
     Ok(GateReport {
         text: render(&update, &results),
         blocked: blocked(&results),
@@ -772,6 +811,22 @@ mod tests {
     }
 
     #[test]
+    fn remote_is_a_url_when_git_passes_it_twice() {
+        assert_eq!(
+            Remote::from_hook_args("origin", Some("git@h:o/r.git")),
+            Remote::Name("origin".into())
+        );
+        assert_eq!(
+            Remote::from_hook_args("../r.git", Some("../r.git")),
+            Remote::Url("../r.git".into())
+        );
+        assert_eq!(
+            Remote::from_hook_args("origin", None),
+            Remote::Name("origin".into())
+        );
+    }
+
+    #[test]
     fn parse_pre_push_rejects_malformed_lines() {
         let err = parse_pre_push(&format!("refs/heads/x {A} refs/heads/x\n")).unwrap_err();
         assert!(format!("{err:#}").contains("line 1"), "{err:#}");
@@ -824,6 +879,10 @@ mod tests {
         assert_eq!(render(&update, &results[..1]), "pass  branch-name: ok\n");
     }
 
+    fn origin() -> Remote {
+        Remote::Name("origin".into())
+    }
+
     fn ctx_with(t: &crate::test_support::TestRepo) -> Ctx {
         Ctx::open(t.path(), Box::new(FakePlatform::new())).unwrap()
     }
@@ -852,7 +911,7 @@ mod tests {
             remote_ref: "refs/tags/v1".into(),
             remote: None,
         };
-        let results = evaluate_with(&ctx, "origin", &update, &quick(&|_| {})).unwrap();
+        let results = evaluate_with(&ctx, &origin(), &update, &quick(&|_| {})).unwrap();
         assert_eq!(results.len(), Rule::ALL.len());
         assert!(results.iter().all(|r| r.outcome == Outcome::Skip));
         assert_eq!(results[0].detail, "not a branch");
@@ -871,7 +930,7 @@ mod tests {
             remote_ref: "refs/heads/dev".into(),
             remote: Some(oid(A)),
         };
-        let results = evaluate_with(&ctx, "origin", &update, &quick(&|_| {})).unwrap();
+        let results = evaluate_with(&ctx, &origin(), &update, &quick(&|_| {})).unwrap();
         let rewrite = outcome_of(&results, Rule::NoRewrite);
         assert!(
             matches!(rewrite.outcome, Outcome::Block { .. }),
@@ -915,7 +974,7 @@ mod tests {
             remote_ref: "refs/heads/feature/x".into(),
             remote: None,
         };
-        let results = evaluate_with(&ctx, "origin", &update, &quick(&progress)).unwrap();
+        let results = evaluate_with(&ctx, &origin(), &update, &quick(&progress)).unwrap();
         release.join().unwrap();
         let lines = lines.into_inner();
         assert!(
@@ -955,7 +1014,7 @@ mod tests {
             remote_ref: "refs/heads/feature/x".into(),
             remote: None,
         };
-        let results = evaluate_with(&ctx, "origin", &update, &waiting).unwrap();
+        let results = evaluate_with(&ctx, &origin(), &update, &waiting).unwrap();
         let record = outcome_of(&results, Rule::Record);
         let Outcome::Block { next } = &record.outcome else {
             panic!("{record:?}");
