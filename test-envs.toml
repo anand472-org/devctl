@@ -11,7 +11,7 @@ platform      = "linux/arm64"
 kind    = "ssh"
 enabled = true
 host    = "devctl-win"             # ~/.ssh/config alias
-vm      = "devctl-win11"           # optional; started with utmctl when set
+vm      = "devctl-win"             # optional; started with utmctl when set
 workdir = "C:/devctl-work"
 
 [envs.macos]
