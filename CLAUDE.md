@@ -72,8 +72,8 @@ Git access goes through the `gix` crate (gitoxide), not `git2`/libgit2. The `git
 
 The crate is kept "max-pure":
 
-- `unsafe_code` is `forbid` in `[lints.rust]`.
-- Dependencies must be pure Rust: no `-sys` crates, `cc`/`cmake`/`bindgen` build steps, or system libraries. Check with `just check-pure`, which covers every target platform (`--target all`), so Linux- and Windows-only dependencies are caught on macOS too. `linux-raw-sys` and `windows-sys` are allowlisted in the recipe because they are pure-Rust declarations that compile no C. Allowlist another crate only after checking it has no C build step.
+- `unsafe_code` is `forbid` in `[workspace.lints.rust]`, inherited by every crate.
+- Dependencies must be pure Rust: no `-sys` crates, `cc`/`cmake`/`bindgen` build steps, or system libraries. Check with `just check-pure`, which covers every target platform (`--target all`), so Linux- and Windows-only dependencies are caught on macOS too. `linux-raw-sys`, `windows-sys`, `js-sys` and `web-sys` are allowlisted in the recipe because they are pure-Rust declarations that compile no C (`js-sys`/`web-sys` come in for wasm targets through the OTLP HTTP client). Allowlist another crate only after checking it has no C build step.
 
 ## Branching (git-flow)
 

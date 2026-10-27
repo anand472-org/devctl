@@ -20,7 +20,7 @@ Dev tools (`just`, the gitoxide CLI) come from [mise](https://mise.jdx.dev), pin
 
 1. Install the tools: `winget install Git.Git Microsoft.PowerShell jdx.mise Rustlang.Rustup`.
 2. Install Visual Studio Build Tools with the C++ workload (the MSVC linker Rust needs, `Microsoft.VisualStudio.Workload.VCTools`).
-3. Add `C:\Program Files\Git\bin` to the user `Path`, so `just` finds `sh` and `bash` from pwsh.
+3. Add `C:\Program Files\Git\bin` and `C:\Program Files\Git\usr\bin` to the user `Path`, so `just` finds `sh` and `bash` from pwsh, and recipes (including `#!/usr/bin/env bash` shebang recipes) find coreutils such as `env`, `mkdir` and `cp`.
 4. Run `git config --global core.longpaths true`.
 5. Add `%LOCALAPPDATA%\mise\shims` to the user `Path`, so IDEs find the tools.
 6. Activate mise in your shell (see Shells below), then from the repo root run `mise install` and `just ci`.
