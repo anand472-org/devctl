@@ -8,6 +8,7 @@ use devctl_store::{Record, Status, Store};
 
 use crate::ctx::Ctx;
 use crate::git::Repo;
+use crate::recipes::error_detail;
 use crate::record::{now_ms, previous_record, worker};
 
 /// Line coverage in percent rounded once to one decimal (half away from
@@ -22,9 +23,13 @@ fn percent(r: &Record) -> Option<f64> {
 }
 
 /// `87.3% (+1.2)`, `50.0% (new)` without a previous percentage, or `n/a`
-/// when `record` has no coverable lines.
+/// when `record` is an error or has no coverable lines.
 fn coverage(record: &Record, previous: Option<&Record>) -> String {
-    let Some(cur) = percent(record) else {
+    let cur = match record.status {
+        Status::Error { .. } => None,
+        Status::Ok | Status::TestsFailed => percent(record),
+    };
+    let Some(cur) = cur else {
         return "n/a".to_string();
     };
     match previous.and_then(percent) {
@@ -62,7 +67,7 @@ fn short(commit: &[u8]) -> String {
 /// One summary line for `record`, e.g.
 /// `feature/x  1a2b3c4  ok  87.3% (+1.2)  tests 9 passed, 0 failed, 0 errored, 1 skipped  5m ago`.
 /// `previous` is the next-newest record on the branch. An `error` record adds
-/// a second line, `    error: <first non-blank line of its stderr tail>`.
+/// a second line, `    error: <detail>`, the detail from [`error_detail`].
 #[must_use]
 pub fn format_summary(record: &Record, previous: Option<&Record>, now_ms: i64) -> String {
     let status = match &record.status {
@@ -83,12 +88,7 @@ pub fn format_summary(record: &Record, previous: Option<&Record>, now_ms: i64) -
         age(record.finished_at_ms, now_ms),
     );
     if let Status::Error { stderr_tail } = &record.status {
-        let first = stderr_tail
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .unwrap_or("(no output)");
-        let _ = write!(line, "\n    error: {first}");
+        let _ = write!(line, "\n    error: {}", error_detail(stderr_tail));
     }
     line
 }
@@ -290,7 +290,27 @@ mod tests {
         let prev = rec(873, 1000, Status::Ok, NOW);
         assert_eq!(
             format_summary(&cur, Some(&prev), NOW),
-            "feature/x  1a2b3c4  error  n/a  tests 9 passed, 0 failed, 0 errored, 1 skipped  2h ago\n    error: `just coverage` failed:"
+            "feature/x  1a2b3c4  error  n/a  tests 9 passed, 0 failed, 0 errored, 1 skipped  2h ago\n    error: line two"
+        );
+    }
+
+    #[test]
+    fn error_line_names_the_recipe_error_and_coverage_is_na() {
+        // The recipe wrote LCOV, then failed without JUnit.
+        let cur = rec(
+            5,
+            10,
+            Status::error(
+                "`just coverage` failed:\ncompile error: x\nerror: recipe `coverage` failed on line 4 with exit code 2\n\
+                 `just coverage` exited non-zero and wrote no JUnit XML; fix the error above, then run `devctl record`",
+            ),
+            NOW,
+        );
+        assert_eq!(
+            format_summary(&cur, None, NOW),
+            "feature/x  1a2b3c4  error  n/a  tests 9 passed, 0 failed, 0 errored, 1 skipped  0s ago\n    \
+             error: compile error: x \u{2014} `just coverage` exited non-zero and wrote no JUnit XML; \
+             fix the error above, then run `devctl record`"
         );
     }
 
@@ -402,6 +422,35 @@ mod tests {
             t.commit("two");
             run_record(&ctx, None).unwrap();
             run_record(&ctx, None).unwrap();
+            let out = run_status(&ctx, None).unwrap();
+            assert!(out.contains("50.0% (-25.0)"), "{out}");
+        }
+
+        #[test]
+        fn delta_skips_error_records() {
+            let t = fixture_repo(false);
+            t.commit("one");
+            let ctx = ctx_of(&t);
+            run_record(&ctx, None).unwrap();
+            // An error record (with coverage) in between is not "previous".
+            t.write("fixture/junit.xml", "not xml");
+            t.write("fixture/cov.info", "SF:src/a.rs\nDA:1,1\nend_of_record\n");
+            t.commit("two");
+            assert!(matches!(
+                run_record(&ctx, None).unwrap().status,
+                Status::Error { .. }
+            ));
+            t.write(
+                "fixture/junit.xml",
+                r#"<testsuites><testsuite name="s"><testcase name="a"/></testsuite></testsuites>"#,
+            );
+            t.write(
+                "fixture/cov.info",
+                "SF:src/a.rs\nDA:1,1\nDA:2,0\nend_of_record\n",
+            );
+            t.commit("three");
+            let out = run_record(&ctx, None).unwrap();
+            assert!(out.text.contains("50.0% (-25.0)"), "{}", out.text);
             let out = run_status(&ctx, None).unwrap();
             assert!(out.contains("50.0% (-25.0)"), "{out}");
         }

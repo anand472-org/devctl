@@ -78,7 +78,7 @@ fn record_with_error_status_exits_non_zero() {
         .failure()
         .stdout(contains("  error  n/a  "))
         .stdout(contains(
-            "    error: missing recipe `coverage`; run `devctl init`",
+            "    error: missing recipe `coverage`; add it to the justfile (`devctl init` will generate one in M2)",
         ))
         .stderr(contains("error: the record ended with status error"));
 }

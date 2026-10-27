@@ -496,42 +496,125 @@ pub fn collect(
     Ok((report, tests, raw))
 }
 
-/// An error status ending with `msg`, after as much of the recipes' stderr
-/// as fits in the kept tail.
-fn error_with_stderr(msg: &str, stderr_tail: &str) -> Status {
-    let tail = stderr_tail.trim();
+/// Heads each recipe's stderr in an error status: `` `just <name>` failed: ``
+/// or `` `just <name>` was killed: ``.
+fn output_header(name: &str, killed: bool) -> String {
+    let how = if killed { "was killed" } else { "failed" };
+    format!("`just {name}` {how}:")
+}
+
+/// Stands in for a header cut off by the stderr limit.
+const CUT_HEADER: &str = "(earlier recipe output cut)";
+
+fn is_output_header(line: &str) -> bool {
+    line == CUT_HEADER
+        || (line.starts_with("`just ")
+            && (line.ends_with("` failed:") || line.ends_with("` was killed:")))
+}
+
+/// `just`'s own report of a failing recipe (`error: recipe `x` failed on line
+/// 3 with exit code 2`), which says nothing the message does not.
+fn is_just_failure_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("error: recipe `") && lower.contains("` failed")
+}
+
+/// An error status ending with the one-line `msg`, after as much of the
+/// recipes' stderr (`stderr`, headed by [`output_header`]s) as fits in the
+/// kept tail. Output cut at the front starts with [`CUT_HEADER`], so
+/// [`error_detail`] can still tell it from devctl's message.
+fn error_with_stderr(msg: &str, stderr: &str) -> Status {
+    let tail = stderr.trim();
     if tail.is_empty() {
-        Status::error(msg)
-    } else {
-        Status::error(&format!("{tail}\n{msg}"))
+        return Status::error(msg);
+    }
+    let budget = STDERR_TAIL_BYTES.saturating_sub(msg.len() + CUT_HEADER.len() + 2);
+    if tail.len() <= budget {
+        return Status::error(&format!("{tail}\n{msg}"));
+    }
+    let mut start = tail.len() - budget;
+    while !tail.is_char_boundary(start) {
+        start += 1;
+    }
+    Status::error(&format!("{CUT_HEADER}\n{}\n{msg}", &tail[start..]))
+}
+
+/// One line describing an error record, for `devctl status` and the gate.
+/// When the record holds recipe output: the last non-blank line the recipes
+/// printed (not `just`'s own "recipe failed" line), a dash, and devctl's
+/// message (the last line), e.g. `compile error: x — `just coverage` exited
+/// non-zero ...`. Otherwise the record is devctl's own error, whose first
+/// line says what failed.
+#[must_use]
+pub fn error_detail(stderr_tail: &str) -> String {
+    let lines: Vec<&str> = stderr_tail
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let Some((&msg, before)) = lines.split_last() else {
+        return "(no output)".to_string();
+    };
+    if !before.iter().any(|l| is_output_header(l)) {
+        return lines[0].to_string();
+    }
+    match before
+        .iter()
+        .rev()
+        .find(|l| !is_output_header(l) && !is_just_failure_line(l))
+    {
+        Some(own) => format!("{own} \u{2014} {msg}"),
+        None => msg.to_string(),
     }
 }
 
-/// The record status for a contract run: no LCOV or no `JUnit` output is an
+/// The error for missing `what` output (`JUnit XML in test-results/*.xml`):
+/// after a failing recipe, point at its error rather than at the contract.
+fn missing_output(failed: &[&str], what: &str, fix: &str) -> String {
+    match failed.last() {
+        Some(name) => format!(
+            "`just {name}` exited non-zero and wrote no {what}; fix the error above, \
+             then run `devctl record`"
+        ),
+        None => fix.to_string(),
+    }
+}
+
+/// The record status for a contract run, given the recipes that exited
+/// non-zero (`failed`, in run order): no LCOV or no `JUnit` output is an
 /// error; a failed or errored test case, or a non-zero exit, is
 /// `TestsFailed`; otherwise `Ok`. A `JUnit` run with no test cases is not by
 /// itself an error.
 #[must_use]
 pub fn classify(
-    exit_ok: bool,
+    failed: &[&str],
     stderr_tail: &str,
     report: Option<&Report>,
     tests: Option<&TestRun>,
 ) -> Status {
     let Some(tests) = tests else {
-        return error_with_stderr(
+        let msg = missing_output(
+            failed,
+            "JUnit XML",
             "no JUnit output in test-results/*.xml; make `just test` write JUnit XML there",
-            stderr_tail,
         );
+        return error_with_stderr(&msg, stderr_tail);
     };
     if report.is_none() {
-        return error_with_stderr(
+        let coverage_failed: Vec<&str> = failed
+            .iter()
+            .copied()
+            .filter(|n| *n == "coverage")
+            .collect();
+        let msg = missing_output(
+            &coverage_failed,
+            "LCOV",
             "no LCOV output in coverage/*.info; make `just coverage` write LCOV there",
-            stderr_tail,
         );
+        return error_with_stderr(&msg, stderr_tail);
     }
     let counts = tests.counts();
-    if !exit_ok || counts.failed > 0 || counts.errored > 0 {
+    if !failed.is_empty() || counts.failed > 0 || counts.errored > 0 {
         Status::TestsFailed
     } else {
         Status::Ok
@@ -591,14 +674,14 @@ pub fn run_contract(run: &RecipeRun) -> anyhow::Result<ContractResult> {
         Ok(missing) => {
             if let Some(name) = missing.first() {
                 return Ok(done_error(&format!(
-                    "missing recipe `{name}`; run `devctl init`"
+                    "missing recipe `{name}`; add it to the justfile (`devctl init` will generate one in M2)"
                 )));
             }
         }
         Err(e) => return Ok(done_error(&format!("{e:#}"))),
     }
 
-    let mut exit_ok = true;
+    let mut failed = Vec::new();
     let mut stderr = String::new();
     for name in REQUIRED {
         if name == "test" && !outputs(run.root, TEST_RESULTS_DIR, "xml")?.is_empty() {
@@ -611,15 +694,21 @@ pub fn run_contract(run: &RecipeRun) -> anyhow::Result<ContractResult> {
                 stderr_tail,
             } => {
                 if !success {
-                    exit_ok = false;
-                    let _ = writeln!(stderr, "`just {name}` failed:\n{}", stderr_tail.trim_end());
+                    failed.push(name);
+                    let _ = writeln!(
+                        stderr,
+                        "{}\n{}",
+                        output_header(name, false),
+                        stderr_tail.trim_end()
+                    );
                 }
             }
             RecipeExit::Cancelled => return Ok(ContractResult::Cancelled),
             RecipeExit::TimedOut { stderr_tail } => {
                 let _ = write!(
                     stderr,
-                    "`just {name}` was killed:\n{}",
+                    "{}\n{}",
+                    output_header(name, true),
                     stderr_tail.trim_end()
                 );
                 return Ok(ContractResult::Done {
@@ -634,7 +723,7 @@ pub fn run_contract(run: &RecipeRun) -> anyhow::Result<ContractResult> {
 
     Ok(match collect(run.root, run.platform) {
         Ok((report, tests, raw)) => ContractResult::Done {
-            status: classify(exit_ok, &stderr, report.as_ref(), tests.as_ref()),
+            status: classify(&failed, &stderr, report.as_ref(), tests.as_ref()),
             report,
             tests,
             raw,
@@ -745,19 +834,93 @@ mod tests {
         let report = devctl_lcov::parse(LCOV).unwrap();
         let pass = devctl_junit::parse(JUNIT_PASS).unwrap();
         let fail = devctl_junit::parse(JUNIT_FAIL).unwrap();
-        assert_eq!(classify(true, "", Some(&report), Some(&pass)), Status::Ok);
+        assert_eq!(classify(&[], "", Some(&report), Some(&pass)), Status::Ok);
         assert_eq!(
-            classify(false, "boom", Some(&report), Some(&pass)),
+            classify(&["coverage"], "boom", Some(&report), Some(&pass)),
             Status::TestsFailed
         );
-        let e = classify(false, "boom", Some(&report), None);
-        assert!(error_text(&e).contains("no JUnit output in test-results/*.xml"));
-        assert!(error_text(&e).contains("boom"), "stderr tail kept: {e:?}");
-        let e = classify(true, "", None, Some(&pass));
-        assert!(error_text(&e).contains("no LCOV output in coverage/*.info"));
+        let e = classify(&[], "", Some(&report), None);
         assert_eq!(
-            classify(true, "", Some(&report), Some(&fail)),
+            error_text(&e),
+            "no JUnit output in test-results/*.xml; make `just test` write JUnit XML there"
+        );
+        let e = classify(&["coverage"], "boom", Some(&report), None);
+        assert_eq!(
+            error_text(&e),
+            "boom\n`just coverage` exited non-zero and wrote no JUnit XML; fix the error above, \
+             then run `devctl record`"
+        );
+        let e = classify(&[], "", None, Some(&pass));
+        assert!(error_text(&e).contains("no LCOV output in coverage/*.info"));
+        let e = classify(&["coverage"], "boom", None, Some(&pass));
+        assert!(
+            error_text(&e).ends_with(
+                "`just coverage` exited non-zero and wrote no LCOV; fix the error above, \
+                 then run `devctl record`"
+            ),
+            "{e:?}"
+        );
+        assert_eq!(
+            classify(&[], "", Some(&report), Some(&fail)),
             Status::TestsFailed
+        );
+    }
+
+    #[test]
+    fn error_detail_pairs_the_recipe_line_with_the_message() {
+        let msg = "`just coverage` exited non-zero and wrote no JUnit XML; fix the error above, \
+                   then run `devctl record`";
+        let tail = format!(
+            "`just coverage` failed:\ncompile error: x\n\nerror: recipe `coverage` failed on line 3 \
+             with exit code 2\n{msg}"
+        );
+        assert_eq!(
+            error_detail(&tail),
+            format!("compile error: x \u{2014} {msg}")
+        );
+        // A recipe that printed nothing: the message alone.
+        assert_eq!(
+            error_detail(&format!("`just coverage` failed:\n\n{msg}")),
+            msg
+        );
+        // Two failing recipes: the last line any of them printed.
+        assert_eq!(
+            error_detail(&format!(
+                "`just coverage` failed:\nA\n`just test` failed:\n\n{msg}"
+            )),
+            format!("A \u{2014} {msg}")
+        );
+        // devctl's own error without recipe output: its first line.
+        assert_eq!(
+            error_detail("missing recipe `test`; add it to the justfile"),
+            "missing recipe `test`; add it to the justfile"
+        );
+        assert_eq!(
+            error_detail("`just --summary` failed in /w: error: bad\n  |\n1 | x; fix it"),
+            "`just --summary` failed in /w: error: bad"
+        );
+        assert_eq!(error_detail(" \n"), "(no output)");
+    }
+
+    #[test]
+    fn long_recipe_output_keeps_its_header_and_the_message() {
+        let msg = "the message";
+        let stderr = format!(
+            "`just coverage` failed:\n{}\nlast words",
+            "x".repeat(10_000)
+        );
+        let Status::Error { stderr_tail } = error_with_stderr(msg, &stderr) else {
+            unreachable!()
+        };
+        assert!(
+            stderr_tail.len() <= STDERR_TAIL_BYTES,
+            "{}",
+            stderr_tail.len()
+        );
+        assert!(stderr_tail.ends_with("last words\nthe message"));
+        assert_eq!(
+            error_detail(&stderr_tail),
+            "last words \u{2014} the message"
         );
     }
 
@@ -765,7 +928,7 @@ mod tests {
     fn classify_empty_junit_is_not_an_error() {
         let report = devctl_lcov::parse(LCOV).unwrap();
         let empty = devctl_junit::parse("<testsuites/>").unwrap();
-        assert_eq!(classify(true, "", Some(&report), Some(&empty)), Status::Ok);
+        assert_eq!(classify(&[], "", Some(&report), Some(&empty)), Status::Ok);
     }
 
     #[test]
@@ -812,12 +975,40 @@ mod tests {
     #[test]
     fn failing_recipe_without_junit_is_error_with_stderr() {
         let f = Fixture::new(
-            "coverage:\n    echo compile-error-xyz >&2\n    exit 2\n\ntest:\n    echo test-broke >&2\n    exit 3\n",
+            "coverage:\n    echo compile-error-xyz >&2\n    exit 2\n\ntest:\n    echo test-broke >&2\n    @exit 3\n",
         );
         let r = f.run();
         let text = error_text(status_of(&r));
         assert!(text.contains("compile-error-xyz"), "{text}");
         assert!(text.contains("test-broke"), "{text}");
+        assert!(
+            text.ends_with(
+                "`just test` exited non-zero and wrote no JUnit XML; fix the error above, \
+                 then run `devctl record`"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            error_detail(text),
+            "test-broke \u{2014} `just test` exited non-zero and wrote no JUnit XML; fix the \
+             error above, then run `devctl record`"
+        );
+    }
+
+    #[test]
+    fn coverage_failing_after_writing_lcov_names_its_error() {
+        // The review's repro: LCOV written, an error printed, exit 2, no JUnit;
+        // `test` exits 0 without writing JUnit either.
+        let f = Fixture::new(
+            "coverage:\n    mkdir -p coverage\n    printf 'SF:src/a.rs\\nDA:1,1\\nend_of_record\\n' > coverage/a.info\n    @echo 'compile error: x' >&2\n    @exit 2\n\ntest:\n    true\n",
+        );
+        let r = f.run();
+        let text = error_text(status_of(&r));
+        assert_eq!(
+            error_detail(text),
+            "compile error: x \u{2014} `just coverage` exited non-zero and wrote no JUnit XML; \
+             fix the error above, then run `devctl record`"
+        );
     }
 
     #[test]
@@ -881,7 +1072,7 @@ mod tests {
         assert_eq!(missing_recipes(&f.just, f.root()).unwrap(), vec!["test"]);
         let text = error_text(status_of(&f.run())).to_string();
         assert!(
-            text.contains("missing recipe `test`; run `devctl init`"),
+            text.contains("missing recipe `test`; add it to the justfile (`devctl init` will generate one in M2)"),
             "{text}"
         );
     }
@@ -908,7 +1099,7 @@ mod tests {
             interrupt: &Interrupt::new(),
         };
         let r = run_contract(&run).unwrap();
-        assert!(error_text(status_of(&r)).contains("missing recipe `coverage`; run `devctl init`"));
+        assert!(error_text(status_of(&r)).contains("missing recipe `coverage`; add it to the justfile (`devctl init` will generate one in M2)"));
     }
 
     #[test]

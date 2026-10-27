@@ -540,21 +540,14 @@ fn record_rule(
         Got::Record(found) => {
             let (record, raw) = *found;
             match &record.status {
-                Status::Error { stderr_tail } => {
-                    let last = stderr_tail
-                        .lines()
-                        .map(str::trim)
-                        .rfind(|l| !l.is_empty())
-                        .unwrap_or("(no output)");
-                    (
-                        block(
-                            Rule::Record,
-                            last,
-                            "fix the recipe, then run `devctl record`",
-                        ),
-                        None,
-                    )
-                }
+                Status::Error { stderr_tail } => (
+                    block(
+                        Rule::Record,
+                        crate::recipes::error_detail(stderr_tail),
+                        "fix the recipe, then run `devctl record`",
+                    ),
+                    None,
+                ),
                 Status::Ok | Status::TestsFailed => {
                     let status = if record.status == Status::Ok {
                         "ok"
@@ -583,8 +576,8 @@ fn tests_rule(record: &Record) -> RuleResult {
         // The recipe exited non-zero although no test failed.
         block(
             Rule::Tests,
-            "the coverage recipe exited non-zero with no failed test",
-            "make `just coverage` exit 0 when the tests pass, then run `devctl record`",
+            "a recipe exited non-zero with no failed test",
+            "make `just coverage` and `just test` exit 0 when the tests pass, then run `devctl record`",
         )
     } else {
         pass(
