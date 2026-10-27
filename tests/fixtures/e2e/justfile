@@ -1,0 +1,18 @@
+# The sample repository of devctl's end-to-end tests (tests/e2e.rs). No
+# language toolchain: `coverage` copies the prepared reports the commit carries
+# in fixture/ into place. POSIX sh only (Git for Windows provides it).
+#
+# fixture/cov.info   LCOV, copied to coverage/
+# fixture/junit.xml  JUnit XML, copied to test-results/ (absent: no JUnit)
+# fixture/slow       seconds to sleep, after touching started-<commit>
+# fixture/exit-code  the recipe's exit code
+
+coverage:
+    mkdir -p coverage test-results
+    cp fixture/cov.info coverage/cov.info
+    if [ -f fixture/junit.xml ]; then cp fixture/junit.xml test-results/junit.xml; fi
+    if [ -f fixture/slow ]; then touch "started-$DEVCTL_COMMIT" && sleep "$(cat fixture/slow)"; fi
+    exit "$(cat fixture/exit-code)"
+
+test:
+    true

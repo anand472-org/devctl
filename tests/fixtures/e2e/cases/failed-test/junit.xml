@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="lib" tests="2" failures="1">
+    <testcase name="first" time="0.01"/>
+    <testcase name="second" time="0.01">
+      <failure message="expected 2, got 3">assertion failed</failure>
+    </testcase>
+  </testsuite>
+</testsuites>

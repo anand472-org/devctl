@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="lib" tests="2">
+    <testcase name="first" time="0.01"/>
+    <testcase name="second" time="0.01"/>
+  </testsuite>
+</testsuites>
