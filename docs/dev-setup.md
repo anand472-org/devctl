@@ -44,7 +44,7 @@ One-time setup, by hand:
 
 1. `brew install --cask utm`.
 2. In UTM, create a VM named `devctl-win` from the Windows 11 ARM64 ISO (Microsoft's download page; activation isn't needed): 4 CPUs, 8 GB RAM, 80 GB disk, shared network. Create a local user (any name).
-3. In the VM, run `scripts/test-local/windows-vm-setup.ps1` as Administrator, then reboot. It is idempotent.
+3. In the VM, run `scripts/test-local/windows-vm-setup.ps1` as Administrator, then reboot. It is idempotent. It checks each tool by the file or command it needs, not by `winget list`: sshd needs the machine-wide PowerShell at `C:\Program Files\PowerShell\7\pwsh.exe`, so a Microsoft Store copy (`where pwsh` pointing into `WindowsApps`) does not count, and the script installs the MSI with `--scope machine --force` next to it.
 4. On the Mac, add an `~/.ssh/config` entry `Host devctl-win` with the VM's IP, your Windows user name (quoted if it contains spaces, e.g. `User "Jane Doe"`) and an `IdentityFile`, and append the Mac's public key (one line) to `C:\ProgramData\ssh\administrators_authorized_keys` in the VM. The first Windows user is an administrator, so sshd reads that file, not `~\.ssh\authorized_keys`; the setup script creates it and fixes its permissions.
 
 Done when `ssh devctl-win "just --version"` prints `just 1.59.0`. If `utmctl` or the `devctl-win` host is missing, `just test-local windows` fails with "SSH host devctl-win not reachable".

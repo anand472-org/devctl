@@ -25,17 +25,30 @@ function Update-SessionPath {
 # Always use the winget source: a broken msstore source must not make the id ambiguous.
 $WingetCommon = @('--source', 'winget', '--accept-source-agreements', '--disable-interactivity')
 
-function Install-Winget([string]$Id, [string[]]$Extra = @()) {
-    winget list --id $Id --exact @WingetCommon *> $null
-    if ($LASTEXITCODE -eq 0) {
+function Test-Command([string]$Name) {
+    [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+# Installs $Id unless $Present passes. $Present checks the file or command the later
+# steps rely on; `winget list` is not enough, since it also counts a copy elsewhere
+# (e.g. the Microsoft Store build of PowerShell under WindowsApps, which sshd running
+# as SYSTEM cannot use as its shell). --force installs even when winget counts the
+# package as installed. Throws if $Present still fails afterwards.
+function Install-Winget([string]$Id, [scriptblock]$Present, [string[]]$Extra = @()) {
+    Update-SessionPath
+    if (& $Present) {
         Write-Host "$Id already installed"
         return
     }
-    winget install --id $Id --exact --silent --accept-package-agreements @WingetCommon @Extra
+    winget install --id $Id --exact --silent --force --accept-package-agreements @WingetCommon @Extra
     # -1978335189 = no applicable update / already installed; 3010 = success, reboot required
     if ($LASTEXITCODE -eq 3010) { $script:RebootNeeded = $true }
     elseif ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
         throw "winget install $Id failed with exit code $LASTEXITCODE"
+    }
+    Update-SessionPath
+    if (-not (& $Present)) {
+        throw "winget installed $Id, but not where this script needs it ($Present); install it there by hand and re-run"
     }
 }
 
@@ -66,10 +79,10 @@ if (-not (Test-Path $authKeys)) { New-Item -ItemType File -Path $authKeys -Force
 icacls.exe $authKeys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE" }
 
-# PowerShell 7, then make it the SSH default shell.
-Install-Winget 'Microsoft.PowerShell'
+# PowerShell 7 (the machine-wide MSI, not the per-user Store build), then make it the
+# SSH default shell.
 $pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
-if (-not (Test-Path $pwsh)) { throw "pwsh not found at $pwsh" }
+Install-Winget 'Microsoft.PowerShell' { Test-Path $pwsh } @('--scope', 'machine')
 New-Item -Path 'HKLM:\SOFTWARE\OpenSSH' -Force | Out-Null
 New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value $pwsh `
     -PropertyType String -Force | Out-Null
@@ -88,12 +101,14 @@ New-Item -ItemType Directory -Path 'C:\devctl-work' -Force | Out-Null
 
 # --- Tools ------------------------------------------------------------------------
 
-Install-Winget 'Git.Git'
-Install-Winget 'jdx.mise'
-Install-Winget 'Rustlang.Rustup'
-Update-SessionPath
+# Git machine-wide: the Path entries above and `git config --system` use Program Files.
+$git = Join-Path $env:ProgramFiles 'Git\cmd\git.exe'
+$gitBash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+Install-Winget 'Git.Git' { (Test-Path $git) -and (Test-Path $gitBash) } @('--scope', 'machine')
+Install-Winget 'jdx.mise' { Test-Command 'mise' }
+Install-Winget 'Rustlang.Rustup' { Test-Command 'rustup' }
 
-& (Join-Path $env:ProgramFiles 'Git\cmd\git.exe') config --system core.longpaths true
+& $git config --system core.longpaths true
 if ($LASTEXITCODE -ne 0) { throw "git config --system failed with exit code $LASTEXITCODE" }
 
 # VS Build Tools: install, or add the ARM64 C++ tools to an existing install.
@@ -115,8 +130,10 @@ if ($vsHasArm64) {
     if ($p.ExitCode -eq 3010) { $script:RebootNeeded = $true }
     elseif ($p.ExitCode -ne 0) { throw "VS Build Tools modify failed with exit code $($p.ExitCode)" }
 } else {
-    Install-Winget 'Microsoft.VisualStudio.2022.BuildTools' @(
-        '--override', "--quiet --wait --norestart $vsComponents")
+    Install-Winget 'Microsoft.VisualStudio.2022.BuildTools' {
+        (Test-Path $vswhere) -and [bool](& $vswhere -products '*' -latest `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath)
+    } @('--override', "--quiet --wait --norestart $vsComponents")
 }
 
 Write-Host 'Done. Add the Mac public key (one line) to:'
