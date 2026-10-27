@@ -65,6 +65,7 @@ assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+devctl-platform = { workspace = true, features = ["fake"] }
 
 [lints]
 workspace = true
