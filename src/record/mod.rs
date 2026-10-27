@@ -89,6 +89,7 @@ pub fn run_record(ctx: &Ctx, rev: Option<&str>) -> Result<RecordSummary> {
     }
     let (id, record) = match outcome? {
         Outcome::Recorded(id, r) | Outcome::Reused(id, r) => (id, r),
+        Outcome::Superseded if ctx.interrupt.is_set() => bail!(crate::interrupt::INTERRUPTED),
         Outcome::Superseded => bail!("recording {commit} was cancelled; run `devctl record` again"),
     };
 
@@ -235,6 +236,33 @@ mod tests {
             out.text.contains("\n    error: missing recipe `coverage`"),
             "{}",
             out.text
+        );
+    }
+
+    #[test]
+    fn interrupt_cancels_the_recording() {
+        let t = fixture_repo(true);
+        t.commit("slow");
+        let mut ctx = Ctx::open(t.path(), Box::new(FakePlatform::new())).unwrap();
+        let interrupt: &'static crate::interrupt::Interrupt =
+            Box::leak(Box::new(crate::interrupt::Interrupt::new()));
+        ctx.interrupt = interrupt;
+        let start = std::time::Instant::now();
+        let err = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                interrupt.signal();
+            });
+            run_record(&ctx, None).unwrap_err()
+        });
+        assert_eq!(format!("{err:#}"), crate::interrupt::INTERRUPTED);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(
+            !ctx.dirs.store().exists() || ctx.store().records_on("dev", 10).unwrap().is_empty()
         );
     }
 

@@ -26,6 +26,7 @@ pub fn run_hook(name: HookName, args: &[String]) -> Result<()> {
                 &process,
                 || tracing::info_span!("hook", name = name.as_str()),
                 |ctx| {
+                    crate::interrupt::install();
                     let mut stdin = String::new();
                     std::io::stdin()
                         .read_to_string(&mut stdin)

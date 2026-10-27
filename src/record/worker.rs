@@ -159,6 +159,7 @@ fn measure(
         commit: &hex,
         timeout: Duration::from_secs(minutes * 60),
         cancel,
+        interrupt: ctx.interrupt,
     };
     match run_contract(&run) {
         Ok(ContractResult::Cancelled) => None,
@@ -398,6 +399,10 @@ pub fn drain(ctx: &Ctx, branch: &str, _held: &Lock) -> Result<()> {
         match record_commit(ctx, branch, commit, Reuse::Allow, &cancel) {
             Ok(Outcome::Recorded(id, r) | Outcome::Reused(id, r)) => {
                 tracing::info!(id, status = status_name(&r.status), %commit, "job done");
+            }
+            // Ctrl+C in `devctl gate`/`pre-push`: the job stays queued.
+            Ok(Outcome::Superseded) if ctx.interrupt.is_set() => {
+                anyhow::bail!(crate::interrupt::INTERRUPTED)
             }
             Ok(Outcome::Superseded) => {}
             Err(e) => tracing::error!(error = %format!("{e:#}"), %commit, "recording failed"),
@@ -856,6 +861,33 @@ pub(crate) mod tests {
         drain(&ctx, "dev", &held).unwrap();
         assert!(ctx.store().record_for(a.as_bytes()).unwrap().is_some());
         assert_eq!(peek(&ctx, "dev").unwrap(), None);
+    }
+
+    #[test]
+    fn interrupted_drain_fails_and_keeps_the_job() {
+        let t = fixture_repo(true);
+        let a = oid(&t.commit("slow"));
+        let mut ctx = ctx_of(&t);
+        let interrupt: &'static crate::interrupt::Interrupt =
+            Box::leak(Box::new(crate::interrupt::Interrupt::new()));
+        ctx.interrupt = interrupt;
+        enqueue(&ctx, "dev", a).unwrap();
+        let start = Instant::now();
+        let err = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_secs(1));
+                interrupt.signal();
+            });
+            run_worker(&ctx, "dev").unwrap_err()
+        });
+        assert_eq!(format!("{err:#}"), crate::interrupt::INTERRUPTED);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(ctx.store().record_for(a.as_bytes()).unwrap().is_none());
+        assert_eq!(peek(&ctx, "dev").unwrap(), Some(a), "job kept");
     }
 
     #[test]

@@ -19,6 +19,8 @@ use devctl_lcov::Report;
 use devctl_platform::{JustCommand, Platform};
 use devctl_store::{RawReports, Status};
 
+use crate::interrupt::Interrupt;
+
 /// One recipe-contract run in a measuring worktree.
 pub struct RecipeRun<'a> {
     pub platform: &'a dyn Platform,
@@ -31,6 +33,8 @@ pub struct RecipeRun<'a> {
     pub timeout: Duration,
     /// Polled every second; `true` kills the running recipe.
     pub cancel: &'a dyn Fn() -> bool,
+    /// Ctrl+C: polled with `cancel`, and told while a recipe runs.
+    pub interrupt: &'a Interrupt,
 }
 
 /// How one recipe run ended.
@@ -257,7 +261,7 @@ fn wait_for(run: &RecipeRun, child: &mut Child) -> anyhow::Result<Waited> {
             Some(Waited::TimedOut)
         } else if now >= next_poll {
             next_poll = now + CANCEL_POLL;
-            (run.cancel)().then_some(Waited::Cancelled)
+            (run.interrupt.is_set() || (run.cancel)()).then_some(Waited::Cancelled)
         } else {
             None
         };
@@ -294,6 +298,7 @@ pub fn run_recipe(run: &RecipeRun, name: &str) -> anyhow::Result<RecipeExit> {
     let span = tracing::info_span!("recipe.run", recipe = name);
     let _entered = span.enter();
     let start = Instant::now();
+    let running = run.interrupt.recipe_running();
     let mut child = run
         .platform
         .spawn_group(recipe_command(run, name))
@@ -309,7 +314,13 @@ pub fn run_recipe(run: &RecipeRun, name: &str) -> anyhow::Result<RecipeExit> {
         kill(run.platform, &mut child);
     }
     let stderr_tail = tail.map(StderrTail::finish).unwrap_or_default();
-    let waited = waited?;
+    // Dropped before the flag is read again: see `Interrupt::signal`.
+    drop(running);
+    let waited = match waited? {
+        // Ctrl+C as the recipe ended: the handler left the exit to us.
+        Waited::Exited(_) if run.interrupt.is_set() => Waited::Cancelled,
+        w => w,
+    };
     tracing::info!(
         histogram.devctl.recipe.duration = start.elapsed().as_secs_f64(),
         recipe = name
@@ -673,6 +684,15 @@ mod tests {
         }
 
         fn run_with(&self, timeout: Duration, cancel: &dyn Fn() -> bool) -> ContractResult {
+            self.run_interruptible(timeout, cancel, &Interrupt::new())
+        }
+
+        fn run_interruptible(
+            &self,
+            timeout: Duration,
+            cancel: &dyn Fn() -> bool,
+            interrupt: &Interrupt,
+        ) -> ContractResult {
             let run = RecipeRun {
                 platform: self.platform.as_ref(),
                 just: &self.just,
@@ -680,6 +700,7 @@ mod tests {
                 commit: "abc123",
                 timeout,
                 cancel,
+                interrupt,
             };
             run_contract(&run).unwrap()
         }
@@ -819,6 +840,7 @@ mod tests {
             commit: "abc123",
             timeout: Duration::from_secs(60),
             cancel: &|| false,
+            interrupt: &Interrupt::new(),
         };
         for cmd in [
             recipe_command(&run, "coverage"),
@@ -883,6 +905,7 @@ mod tests {
             commit: "abc123",
             timeout: Duration::from_secs(60),
             cancel: &|| false,
+            interrupt: &Interrupt::new(),
         };
         let r = run_contract(&run).unwrap();
         assert!(error_text(status_of(&r)).contains("missing recipe `coverage`; run `devctl init`"));
@@ -981,6 +1004,41 @@ mod tests {
     }
 
     #[test]
+    fn interrupt_kills_recipe_tree() {
+        let f = Fixture::new(HANGING);
+        let interrupt = Interrupt::new();
+        let start = Instant::now();
+        let r = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_secs(1));
+                // A recipe is running, so the handler leaves it to the loop.
+                assert_eq!(interrupt.signal(), crate::interrupt::OnSignal::Cancel);
+            });
+            f.run_interruptible(Duration::from_secs(60), &|| false, &interrupt)
+        });
+        assert_eq!(r, ContractResult::Cancelled);
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_tree_dead(f.root());
+        // The recipe guard is released.
+        assert_eq!(interrupt.signal(), crate::interrupt::OnSignal::Exit);
+    }
+
+    #[test]
+    fn interrupt_before_a_recipe_cancels_it() {
+        let f = Fixture::new(&contract_justfile(true));
+        let interrupt = Interrupt::new();
+        let r = f.run_interruptible(Duration::from_secs(60), &|| false, &interrupt);
+        assert!(matches!(r, ContractResult::Done { .. }));
+        interrupt.signal();
+        let r = f.run_interruptible(Duration::from_secs(60), &|| false, &interrupt);
+        assert_eq!(r, ContractResult::Cancelled);
+    }
+
+    #[test]
     fn timeout_is_error() {
         let f = Fixture::new(HANGING);
         let start = Instant::now();
@@ -1030,6 +1088,7 @@ mod tests {
             commit: "abc123",
             timeout: Duration::from_secs(60),
             cancel: &|| false,
+            interrupt: &Interrupt::new(),
         };
         let start = Instant::now();
         let exit = run_recipe(&run, "coverage").unwrap();
@@ -1057,6 +1116,7 @@ mod tests {
             commit: "abc123",
             timeout: Duration::from_secs(60),
             cancel: &|| false,
+            interrupt: &Interrupt::new(),
         };
         let RecipeExit::Exited {
             success,
@@ -1123,6 +1183,7 @@ mod tests {
                 commit: "abc123",
                 timeout: Duration::from_secs(60),
                 cancel: &|| false,
+                interrupt: &Interrupt::new(),
             };
             run_recipe(&run, "coverage").unwrap();
         });
