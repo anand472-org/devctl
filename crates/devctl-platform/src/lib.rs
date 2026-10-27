@@ -32,15 +32,18 @@ pub trait Platform: Send + Sync {
     /// If the process cannot be spawned.
     fn spawn_detached(&self, cmd: Command) -> io::Result<u32>;
 
-    /// Spawns `cmd` as the leader of a new process group so `kill_tree` can kill everything it
-    /// starts.
+    /// Spawns `cmd` as the leader of a new process group (on Windows, also a Job Object) so
+    /// `kill_tree` can kill everything it starts. Callers must call `kill_tree` with the child's
+    /// pid once they are done with it, even after it exits: that kills leftovers and, on
+    /// Windows, releases the job.
     ///
     /// # Errors
     /// If the process cannot be spawned.
     fn spawn_group(&self, cmd: Command) -> io::Result<Child>;
 
     /// Kills the process `pid` (a group leader from `spawn_group`/`spawn_detached`) and all of
-    /// its descendants. A process that is already gone is not an error on Unix.
+    /// its descendants, including ones whose parent has already exited. A process that is
+    /// already gone is not an error.
     ///
     /// # Errors
     /// If the signal or `taskkill` fails.
