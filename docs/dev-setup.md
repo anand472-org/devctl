@@ -45,6 +45,6 @@ One-time setup, by hand:
 1. `brew install --cask utm`.
 2. In UTM, create a VM named `devctl-win11` from the Windows 11 ARM64 ISO (Microsoft's download page; activation isn't needed): 4 CPUs, 8 GB RAM, 80 GB disk, shared network. Create the user `dev`.
 3. In the VM, run `scripts/test-local/windows-vm-setup.ps1` as Administrator, then reboot. It is idempotent.
-4. On the Mac, add an `~/.ssh/config` entry `Host devctl-win` with the VM's IP, user `dev` and an `IdentityFile`, and put that key's public half in the VM (see the end of the setup script's output).
+4. On the Mac, add an `~/.ssh/config` entry `Host devctl-win` with the VM's IP, user `dev` and an `IdentityFile`, and append the Mac's public key (one line) to `C:\ProgramData\ssh\administrators_authorized_keys` in the VM. `dev` is an administrator, so sshd reads that file, not `~\.ssh\authorized_keys`; the setup script creates it and fixes its permissions.
 
 Done when `ssh devctl-win "just --version"` prints `just 1.59.0`. If `utmctl` or the `devctl-win` host is missing, `just test-local windows` fails with "SSH host devctl-win not reachable".

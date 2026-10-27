@@ -44,8 +44,12 @@ test-local *envs:
     all=$(env_all_names) || exit 1
     envs="{{envs}}"
     [ -n "$envs" ] || envs=$(env_names) || exit 1
+    if [ -z "$envs" ]; then
+        echo "no test environments enabled in test-envs.toml" >&2
+        exit 1
+    fi
     for e in $envs; do
-        if ! printf '%s\n' "$all" | grep -qx -- "$e"; then
+        if ! printf '%s\n' "$all" | grep -qxF -- "$e"; then
             echo "error: unknown environment '$e'; defined: $(echo $all)" >&2
             exit 1
         fi

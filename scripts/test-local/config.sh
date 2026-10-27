@@ -96,9 +96,16 @@ env_require() {
     done
 }
 
-# Tar stream of the working tree: tracked and untracked files, minus ignored ones.
-tree_tar() {
-    git ls-files -co --exclude-standard -z | tar --null -T - -cf -
+# make_tree_tar: archives the working tree (tracked and untracked files, minus ignored
+# ones) into a temp file and sets TREE_TAR to its path. Each step is checked, so a failure
+# aborts instead of shipping an incomplete tree. The file is removed on exit.
+# --no-xattrs keeps bsdtar from adding extended headers that GNU tar warns about.
+make_tree_tar() {
+    _dir=$(mktemp -d) || return 1
+    trap "rm -rf '$_dir'" EXIT
+    git ls-files -co --exclude-standard -z > "$_dir/files" || return 1
+    tar --no-xattrs --null -T "$_dir/files" -cf "$_dir/tree.tar" || return 1
+    TREE_TAR="$_dir/tree.tar"
 }
 
 # The command run inside each environment.

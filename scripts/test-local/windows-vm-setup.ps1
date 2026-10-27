@@ -18,10 +18,19 @@ function Install-Winget([string]$Id, [string[]]$Extra = @()) {
         return
     }
     winget install --id $Id --exact --silent --accept-package-agreements --accept-source-agreements @Extra
-    # -1978335189 = no applicable update / already installed
-    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+    # -1978335189 = no applicable update / already installed; 3010 = success, reboot required
+    if ($LASTEXITCODE -eq 3010) { $script:RebootNeeded = $true }
+    elseif ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
         throw "winget install $Id failed with exit code $LASTEXITCODE"
     }
+}
+
+$script:RebootNeeded = $false
+
+# winget does not refresh this session's PATH; do it so freshly installed tools are found.
+function Update-SessionPath {
+    $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'),
+        [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
 }
 
 # OpenSSH server
@@ -41,10 +50,31 @@ Install-Winget 'Git.Git'
 Install-Winget 'Microsoft.PowerShell'
 Install-Winget 'jdx.mise'
 Install-Winget 'Rustlang.Rustup'
-Install-Winget 'Microsoft.VisualStudio.2022.BuildTools' @(
-    '--override',
-    '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --add Microsoft.VisualStudio.Component.VC.Tools.ARM64'
-)
+
+# VS Build Tools: install, or add the ARM64 C++ tools to an existing install.
+$vsComponents = '--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --add Microsoft.VisualStudio.Component.VC.Tools.ARM64'
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$vsHome = $null
+$vsHasArm64 = $false
+if (Test-Path $vswhere) {
+    $vsHome = & $vswhere -products '*' -latest -property installationPath
+    $vsHasArm64 = [bool](& $vswhere -products '*' -latest `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath)
+}
+if ($vsHasArm64) {
+    Write-Host 'VS Build Tools with ARM64 C++ tools already installed'
+} elseif ($vsHome) {
+    $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe'
+    $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList `
+        "modify --installPath `"$vsHome`" --quiet --norestart $vsComponents"
+    if ($p.ExitCode -eq 3010) { $script:RebootNeeded = $true }
+    elseif ($p.ExitCode -ne 0) { throw "VS Build Tools modify failed with exit code $($p.ExitCode)" }
+} else {
+    Install-Winget 'Microsoft.VisualStudio.2022.BuildTools' @(
+        '--override', "--quiet --wait --norestart $vsComponents")
+}
+
+Update-SessionPath
 
 # SSH default shell: pwsh (installed above)
 $pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
@@ -58,11 +88,23 @@ Restart-Service sshd
 Add-MachinePath 'C:\Program Files\Git\bin'
 Add-MachinePath (Join-Path $env:LOCALAPPDATA 'mise\shims')
 
-git config --system core.longpaths true
+Update-SessionPath
+& (Join-Path $env:ProgramFiles 'Git\cmd\git.exe') config --system core.longpaths true
+if ($LASTEXITCODE -ne 0) { throw "git config --system failed with exit code $LASTEXITCODE" }
 
 New-Item -ItemType Directory -Path 'C:\devctl-work' -Force | Out-Null
 [Environment]::SetEnvironmentVariable('CARGO_TARGET_DIR', 'C:\devctl-target', 'Machine')
 
-Write-Host 'Done. Reboot or sign out/in so the new Path and CARGO_TARGET_DIR take effect.'
-Write-Host 'Then add your Mac public key to C:\ProgramData\ssh\administrators_authorized_keys'
-Write-Host '(administrator user) or ~\.ssh\authorized_keys (standard user).'
+# Administrators' keys live in administrators_authorized_keys; sshd ignores the file
+# unless only SYSTEM and Administrators can access it.
+$authKeys = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+if (-not (Test-Path $authKeys)) { New-Item -ItemType File -Path $authKeys -Force | Out-Null }
+icacls.exe $authKeys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE" }
+
+Write-Host 'Done. Add the Mac public key (one line) to:'
+Write-Host "  $authKeys"
+Write-Host 'then reboot the VM so the new Path and CARGO_TARGET_DIR take effect.'
+if ($script:RebootNeeded) {
+    Write-Host 'A reboot is REQUIRED (VS Build Tools): reboot the VM before the first test run.'
+}

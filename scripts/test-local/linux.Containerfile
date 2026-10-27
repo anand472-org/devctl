@@ -20,8 +20,11 @@ ENV CARGO_TARGET_DIR=/home/dev/target
 
 RUN git config --global user.name "devctl test" \
     && git config --global user.email "devctl-test@example.com" \
-    && curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal \
-    && curl -fsSL https://mise.run | MISE_VERSION=v2026.8.16 sh \
+    && curl -fsSL -o /tmp/rustup-init.sh https://sh.rustup.rs \
+    && sh /tmp/rustup-init.sh -y --default-toolchain none --profile minimal \
+    && curl -fsSL -o /tmp/mise-install.sh https://mise.run \
+    && MISE_VERSION=v2026.8.16 sh /tmp/mise-install.sh \
+    && rm -f /tmp/rustup-init.sh /tmp/mise-install.sh \
     && mkdir -p /home/dev/.local/share/mise
 
 WORKDIR /home/dev/work
