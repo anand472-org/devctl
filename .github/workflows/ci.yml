@@ -27,21 +27,23 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install
 
+      # Dev tools are pinned in .cargo/config.toml, so the cache key changes with them.
+      - name: Cache dev tools
+        id: tools-cache
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: tools-${{ runner.os }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain.toml') }}
+
+      - name: Install dev tools
+        if: steps.tools-cache.outputs.cache-hit != 'true'
+        run: cargo install-just && cargo install-gix
+
+      - name: Add dev tools to PATH
+        run: echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Format
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --locked
-
-      - name: Pure-Rust dependency check
-        run: |
-          if cargo tree --locked -e normal,build,dev --prefix none | grep -E -- '-sys |^cc |^cmake|^bindgen'; then
-            echo "::error::Non-pure-Rust dependency found (see list above)"
-            exit 1
-          fi
+      - name: Lint, test and pure-Rust check
+        run: just ci
