@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="4" failures="1" errors="0" time="0.45">
+    <testsuite name="src/sum.test.ts" timestamp="2026-10-27T10:00:00.000Z" hostname="ci" tests="3" failures="1" errors="0" skipped="1" time="0.05">
+        <testcase classname="src/sum.test.ts" name="adds &gt; positive" time="0.001">
+        </testcase>
+        <testcase classname="src/sum.test.ts" name="adds &gt; negative" time="0.002">
+            <failure message="expected 1 to be 2" type="AssertionError"><![CDATA[AssertionError: expected 1 to be 2
+ at src/sum.test.ts:9:3]]></failure>
+        </testcase>
+        <testcase classname="src/sum.test.ts" name="todo" time="0">
+            <skipped/>
+        </testcase>
+    </testsuite>
+    <testsuite name="src/mul.test.ts" timestamp="2026-10-27T10:00:00.000Z" hostname="ci" tests="1" failures="0" errors="0" skipped="0" time="0.01">
+        <testcase classname="src/mul.test.ts" name="multiplies" time="0.003">
+        </testcase>
+    </testsuite>
+</testsuites>

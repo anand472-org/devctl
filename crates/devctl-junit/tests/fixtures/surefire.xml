@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0" name="com.example.AppTest" time="1,234.5" tests="5" errors="1" skipped="1" failures="1">
+  <properties>
+    <property name="java.version" value="21"/>
+  </properties>
+  <testcase name="testOk" classname="com.example.AppTest" time="0.01"/>
+  <testcase name="testFails" classname="com.example.AppTest" time="1,234.5">
+    <failure message="expected:&lt;1&gt; but was:&lt;2&gt;" type="org.opentest4j.AssertionFailedError">org.opentest4j.AssertionFailedError: expected: &lt;1&gt; but was: &lt;2&gt;
+	at com.example.AppTest.testFails(AppTest.java:10)
+</failure>
+  </testcase>
+  <testcase name="testIgnored" classname="com.example.AppTest" time="0">
+    <skipped message="ignored"/>
+  </testcase>
+  <testcase name="testBoom" classname="com.example.AppTest" time="0.02">
+    <error message="boom" type="java.lang.IllegalStateException">java.lang.IllegalStateException: boom</error>
+    <system-out><![CDATA[out]]></system-out>
+  </testcase>
+  <testcase name="testFlaky" classname="com.example.AppTest" time="0.5">
+    <flakyFailure message="first run" type="java.lang.AssertionError">trace</flakyFailure>
+    <system-out><![CDATA[retry]]></system-out>
+  </testcase>
+</testsuite>

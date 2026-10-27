@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="3" failures="1" errors="0" time="0.010">
+	<testsuite tests="3" failures="1" errors="0" id="0" name="github.com/example/pkg" time="0.010" timestamp="2026-10-27T10:00:00Z">
+		<properties>
+			<property name="go.version" value="go1.26"></property>
+		</properties>
+		<testcase name="TestA" classname="pkg" time="0.000"></testcase>
+		<testcase name="TestB" classname="pkg" time="0.010">
+			<failure message="Failed" type="">    b_test.go:12: got 1 want 2</failure>
+		</testcase>
+		<testcase name="TestC" classname="pkg" time="0.000">
+			<skipped message="skipped"></skipped>
+		</testcase>
+	</testsuite>
+</testsuites>

@@ -7,3 +7,7 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+quick-xml.workspace = true
+thiserror.workspace = true

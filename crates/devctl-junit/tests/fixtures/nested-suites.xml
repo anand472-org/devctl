@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE testsuites>
+<testsuites>
+  <testsuite name="outer">
+    <testcase name="o1" time="1"/>
+    <testsuite name="inner">
+      <testcase name="i1" time="2"><failure message="x"/></testcase>
+      <testsuite name="innermost">
+        <testcase name="m1" time="3"><error message="e"/></testcase>
+      </testsuite>
+      <testcase name="i2" time="4"><skipped/></testcase>
+    </testsuite>
+    <testcase name="o2" time="0.5"/>
+  </testsuite>
+</testsuites>

@@ -5,6 +5,7 @@ resolver = "3"
 [workspace.dependencies]
 anyhow = "1.0.104"
 thiserror = "2.0.21"
+quick-xml = "0.42.0"
 clap = { version = "4.6.7", features = ["derive"] }
 gix = "0.90.0"
 assert_cmd = "2.2.2"

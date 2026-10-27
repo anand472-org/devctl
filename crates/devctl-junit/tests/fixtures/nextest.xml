@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="4" failures="1" errors="0" uuid="0f0e0d0c" timestamp="2026-10-27T10:00:00.000+00:00" time="0.512">
+    <testsuite name="devctl-lcov" tests="3" disabled="0" errors="0" failures="1">
+        <testcase name="parses_empty" classname="devctl-lcov::parse" timestamp="2026-10-27T10:00:00.000+00:00" time="0.010"/>
+        <testcase name="merges_reports" classname="devctl-lcov::parse" timestamp="2026-10-27T10:00:00.010+00:00" time="0.020"/>
+        <testcase name="rejects_garbage" classname="devctl-lcov::parse" timestamp="2026-10-27T10:00:00.030+00:00" time="0.030">
+            <failure message="assertion failed" type="assertion failure">assertion failed: r.is_err()</failure>
+            <system-out>
+stdout text
+</system-out>
+            <system-err>
+stderr text
+</system-err>
+        </testcase>
+    </testsuite>
+    <testsuite name="devctl-platform" tests="1" disabled="0" errors="0" failures="0">
+        <testcase name="spawns" classname="devctl-platform" time="0.400">
+            <skipped/>
+        </testcase>
+    </testsuite>
+</testsuites>
