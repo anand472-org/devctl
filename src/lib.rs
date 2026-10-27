@@ -1,7 +1,9 @@
 pub mod cli;
 pub mod config;
 pub mod ctx;
+pub mod gate;
 pub mod git;
+pub mod hooks;
 pub mod recipes;
 pub mod record;
 pub mod status;
@@ -156,6 +158,24 @@ pub fn run(cli: &Cli) -> Result<()> {
             },
             |ctx| record::worker::run_worker(ctx, branch),
         ),
+        Command::Gate { target } => {
+            let report = in_session(
+                &Process::Cli,
+                || tracing::info_span!("devctl.cli", command = "gate"),
+                |ctx| {
+                    let report = gate::run_gate(ctx, target.as_deref())?;
+                    print!("{}", report.text);
+                    Ok(report)
+                },
+            )?;
+            if report.blocked {
+                bail!(
+                    "push blocked by devctl; fix what is listed above, then run `devctl gate` again"
+                );
+            }
+            Ok(())
+        }
+        Command::Hook { name, args } => hooks::run_hook(*name, args),
     }
 }
 
