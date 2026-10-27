@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod telemetry;
 
 use anyhow::Result;
 
