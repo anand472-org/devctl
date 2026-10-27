@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- a bare testsuite root -->
+<?xml-stylesheet type="text/xsl" href="x.xsl"?>
+<testsuite name="solo" tests="2">
+  <testcase name="one" classname="a.B" time="2.5"/>
+  <testcase name="two" classname="a.B"/>
+</testsuite>
