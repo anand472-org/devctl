@@ -52,17 +52,18 @@ pub fn run_hook(name: HookName, args: &[String]) -> Result<()> {
 /// # Errors
 /// On missing arguments, unparsable input or any failure evaluating a rule.
 pub fn pre_push(ctx: &Ctx, args: &[String], stdin: &str) -> Result<GateReport> {
-    let remote = args.first().ok_or_else(|| {
+    let name = args.first().ok_or_else(|| {
         anyhow!(
             "pre-push was called without the remote name; git passes it, so run \
              `git push` instead of calling the hook directly"
         )
     })?;
+    let remote = gate::Remote::from_hook_args(name, args.get(1).map(String::as_str));
     let updates = gate::parse_pre_push(stdin)?;
     let mut text = String::new();
     let mut blocked = false;
     for update in &updates {
-        let results = gate::evaluate(ctx, remote, update)?;
+        let results = gate::evaluate(ctx, &remote, update)?;
         blocked |= gate::blocked(&results);
         text.push_str(&gate::render(update, &results));
     }
