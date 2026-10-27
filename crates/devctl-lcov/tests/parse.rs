@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use devctl_lcov::{LineCounts, Report, parse};
+use devctl_lcov::{Function, LineCounts, Report, parse};
 
 fn fixture(name: &str) -> String {
     let path = format!("{}/tests/fixtures/{name}.info", env!("CARGO_MANIFEST_DIR"));
@@ -203,13 +203,52 @@ fn bad_da_reports_line_number() {
 }
 
 #[test]
-fn negative_and_overflowing_hits_are_errors() {
-    assert_eq!(parse("SF:a\nDA:1,-1\n").unwrap_err().line, 2);
+fn negative_hits_clamp_and_overflow_saturates() {
+    let r = parse(
+        "SF:a\nDA:1,-1\nDA:2,99999999999999999999999\nFN:1,f\nFNDA:-3,f\nBRDA:1,0,0,-1\nend_of_record\n",
+    )
+    .unwrap();
+    let f = &r.files["a"];
+    assert_eq!(f.lines[&1], 0);
+    assert_eq!(f.lines[&2], u64::MAX);
+    assert_eq!(f.functions["f"].hits, 0);
+    assert_eq!(f.branches[&(1, "0".into(), "0".into())], Some(0));
+}
+
+#[test]
+fn non_numeric_hits_are_errors() {
+    assert_eq!(parse("SF:a\nDA:1,abc\n").unwrap_err().line, 2);
+    assert_eq!(parse("SF:a\nDA:1,-\n").unwrap_err().line, 2);
+}
+
+#[test]
+fn leading_bom_is_ignored() {
+    let r = parse("\u{feff}SF:a.rs\nDA:1,2\nend_of_record\n").unwrap();
+    assert_eq!(r.files["a.rs"].lines[&1], 2);
+}
+
+#[test]
+fn surrounding_whitespace_is_ignored() {
+    let r = parse("  SF:a.rs\n  DA:1,1\t\nend_of_record \nSF:b.rs\nDA:1,1\n").unwrap();
+    assert_eq!(r.files.len(), 2);
+    assert_eq!(r.files["a.rs"].lines[&1], 1);
+}
+
+#[test]
+fn fn_with_end_line_uses_name() {
+    let r = parse("SF:a\nFN:3,5,my_fn\nFNDA:2,my_fn\nend_of_record\n").unwrap();
     assert_eq!(
-        parse("SF:a\nDA:1,99999999999999999999999\n")
-            .unwrap_err()
-            .line,
-        2
+        r.files["a"].functions["my_fn"],
+        Function { line: 3, hits: 2 }
+    );
+}
+
+#[test]
+fn fnda_without_fn_is_kept() {
+    let r = parse("SF:a\nFNDA:4,orphan\nend_of_record\n").unwrap();
+    assert_eq!(
+        r.files["a"].functions["orphan"],
+        Function { line: 0, hits: 4 }
     );
 }
 
