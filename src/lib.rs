@@ -139,6 +139,14 @@ pub fn run(cli: &Cli) -> Result<()> {
                 Ok(())
             },
         ),
+        Command::Status { branch } => in_session(
+            &Process::Cli,
+            || tracing::info_span!("devctl.cli", command = "status"),
+            |ctx| {
+                println!("{}", status::run_status(ctx, branch.as_deref())?);
+                Ok(())
+            },
+        ),
         Command::Worker { branch } => in_session(
             &Process::Worker,
             || {
