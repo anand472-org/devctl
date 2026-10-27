@@ -8,7 +8,7 @@ pub mod worker;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use devctl_store::{Status, Store};
+use devctl_store::{Record, RecordId, Status, Store};
 
 use crate::ctx::Ctx;
 use crate::git::Repo;
@@ -21,6 +21,22 @@ pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// The next-newest record after `id` (in `history`, newest first) that is of
+/// a different commit than `record`: a re-record of the same commit is not
+/// "previous". Shared by `record` and `status`.
+pub(crate) fn previous_record<'a>(
+    history: &'a [(RecordId, Record)],
+    id: RecordId,
+    record: &Record,
+) -> Option<&'a Record> {
+    history
+        .iter()
+        .skip_while(|(i, _)| *i != id)
+        .skip(1)
+        .find(|(_, r)| r.commit != record.commit)
+        .map(|(_, r)| r)
 }
 
 /// What `devctl record` prints and how it ended.
@@ -55,16 +71,23 @@ pub fn run_record(ctx: &Ctx, rev: Option<&str>) -> Result<RecordSummary> {
     };
     // Never reuse (always measure, so a flaky result can be re-run) and never
     // cancel: the developer asked for this commit.
-    let outcome = worker::record_commit(ctx, &branch, commit, Reuse::Never, &|| false)?;
+    let outcome = worker::record_commit(ctx, &branch, commit, Reuse::Never, &|| false);
     drop(lock);
+    // A job queued for this very commit would only produce a duplicate.
+    if matches!(&outcome, Ok(Outcome::Recorded(..) | Outcome::Reused(..)))
+        && let Err(e) = queue::complete(ctx, &branch, commit)
+    {
+        tracing::warn!(error = %format!("{e:#}"), "cannot clear the queued job for the recorded commit");
+    }
     // A hook may have queued a job while we held the lock, and its worker
-    // exited seeing the lock held; hand the job to a fresh worker.
+    // exited seeing the lock held; hand the job to a fresh worker, even when
+    // recording failed.
     if queue::peek(ctx, &branch)?.is_some()
         && let Err(e) = worker::spawn_worker(ctx, &branch)
     {
         tracing::warn!(error = %format!("{e:#}"), "cannot start a worker for the queued job");
     }
-    let (id, record) = match outcome {
+    let (id, record) = match outcome? {
         Outcome::Recorded(id, r) | Outcome::Reused(id, r) => (id, r),
         Outcome::Superseded => bail!("recording {commit} was cancelled; run `devctl record` again"),
     };
@@ -78,14 +101,7 @@ pub fn run_record(ctx: &Ctx, rev: Option<&str>) -> Result<RecordSummary> {
                 ctx.dirs.store().display()
             )
         })?;
-    // The next-newest record of a different commit (a re-record of the same
-    // commit is not "previous").
-    let previous = history
-        .iter()
-        .skip_while(|(i, _)| *i != id)
-        .skip(1)
-        .find(|(_, r)| r.commit != record.commit)
-        .map(|(_, r)| r);
+    let previous = previous_record(&history, id, &record);
     Ok(RecordSummary {
         text: format_summary(&record, previous, now_ms()),
         status: record.status,
@@ -163,6 +179,37 @@ mod tests {
         let spawned = fake.spawned();
         assert_eq!(spawned.len(), 1);
         assert_eq!(spawned[0].args, ["worker", "--branch", "dev"]);
+    }
+
+    #[test]
+    fn explicit_record_completes_a_queued_job_for_the_same_commit() {
+        let t = fixture_repo(false);
+        t.commit("one");
+        let fake = std::sync::Arc::new(FakePlatform::new());
+        let ctx = Ctx::open(t.path(), Box::new(SharedFake(fake.clone()))).unwrap();
+        let head = ctx.repo.resolve("HEAD").unwrap();
+        queue::enqueue(&ctx, "dev", head).unwrap();
+        run_record(&ctx, None).unwrap();
+        assert_eq!(peek(&ctx, "dev").unwrap(), None);
+        assert!(fake.spawned().is_empty(), "no worker for a done job");
+        assert_eq!(ctx.store().records_on("dev", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn queued_job_is_handed_off_even_when_recording_fails() {
+        let t = fixture_repo(false);
+        let first = t.commit("one");
+        t.write("src/a.rs", "changed\n");
+        t.commit("two");
+        let fake = std::sync::Arc::new(FakePlatform::new());
+        let ctx = Ctx::open(t.path(), Box::new(SharedFake(fake.clone()))).unwrap();
+        let head = ctx.repo.resolve("HEAD").unwrap();
+        queue::enqueue(&ctx, "dev", head).unwrap();
+        // A directory where the store should be makes recording fail.
+        std::fs::create_dir_all(ctx.dirs.store()).unwrap();
+        assert!(run_record(&ctx, Some(&first)).is_err());
+        assert_eq!(peek(&ctx, "dev").unwrap(), Some(head));
+        assert_eq!(fake.spawned().len(), 1, "worker started despite the error");
     }
 
     #[test]

@@ -18,6 +18,12 @@ pub enum Command {
         #[arg(long)]
         commit: Option<String>,
     },
+    /// Show the last record of each branch
+    Status {
+        /// Show only this branch
+        #[arg(long)]
+        branch: Option<String>,
+    },
     /// The background recorder for one branch. Internal: started by the
     /// `post-commit` hook.
     #[command(hide = true)]

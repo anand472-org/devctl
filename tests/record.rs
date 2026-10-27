@@ -178,3 +178,31 @@ fn killed_worker_releases_lock() {
         Some(ObjectId::from_hex(head.as_bytes()).unwrap())
     );
 }
+
+#[test]
+fn status_reports_records_and_empty_repos() {
+    let t = fixture("");
+    t.commit("one");
+    devctl(t.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(contains("no records yet; run `devctl record`"));
+    devctl(t.path())
+        .arg("record")
+        .timeout(Duration::from_secs(60))
+        .assert()
+        .success();
+    devctl(t.path())
+        .args(["status", "--branch", "dev"])
+        .assert()
+        .success()
+        .stdout(contains("dev  "))
+        .stdout(contains("75.0% (new)"))
+        .stdout(contains("measure "));
+    devctl(t.path())
+        .args(["status", "--branch", "nope"])
+        .assert()
+        .success()
+        .stdout(contains("no records for nope; run `devctl record` on it"));
+}
