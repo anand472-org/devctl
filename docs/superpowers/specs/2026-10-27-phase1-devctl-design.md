@@ -234,7 +234,7 @@ Values are serialized with serde + `postcard`.
 
 ### 7.4 M1 exit criteria
 
-On Windows, Linux and macOS, each on x64 and arm64, in CI:
+On Windows, Linux and macOS (Linux in CI; Windows and macOS with `just test-local`):
 
 - A commit is recorded in the background and shown by `devctl status`.
 - `pre-commit` blocks a commit of more than 10 files or 500 or more changed lines (added + removed); `git commit --no-verify` bypasses it.

@@ -93,7 +93,7 @@ Uses git-flow-next (`git flow`) with the classic preset, configured in `.git/con
 
 ## CI
 
-`.github/workflows/ci.yml` runs `just ci` on PRs and on pushes to `dev` and `master`, as a matrix over six runners (Windows, macOS and Linux, each x64 and arm64). `jdx/mise-action` installs and caches the dev tools from `mise.toml`/`mise.lock`.
+`.github/workflows/ci.yml` runs `just ci` on PRs and on pushes to `dev` and `master`, on Linux (`ubuntu-latest`) only. Windows and macOS are checked locally with `just test-local` when needed (see `docs/dev-setup.md`). `jdx/mise-action` installs and caches the dev tools from `mise.toml`/`mise.lock`.
 
 The Claude Code GitHub Actions are both authenticated with the `ANTHROPIC_API_KEY` repo secret:
 
