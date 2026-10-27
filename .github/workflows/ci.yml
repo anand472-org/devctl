@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, master]
+  pull_request:
+    branches: [dev, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # Installs the toolchain and components pinned in rust-toolchain.toml.
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Pure-Rust dependency check
+        run: |
+          if cargo tree --locked -e normal,build,dev --prefix none | grep -E -- '-sys |^cc |^cmake|^bindgen'; then
+            echo "::error::Non-pure-Rust dependency found (see list above)"
+            exit 1
+          fi
