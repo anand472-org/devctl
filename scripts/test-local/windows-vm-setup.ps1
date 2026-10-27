@@ -31,8 +31,7 @@ function Test-Command([string]$Name) {
 
 # Installs $Id unless $Present passes. $Present checks the file or command the later
 # steps rely on; `winget list` is not enough, since it also counts a copy elsewhere
-# (e.g. the Microsoft Store build of PowerShell under WindowsApps, which sshd running
-# as SYSTEM cannot use as its shell). --force installs even when winget counts the
+# (e.g. a Store/MSIX copy under WindowsApps). --force installs even when winget counts the
 # package as installed. Throws if $Present still fails afterwards.
 function Install-Winget([string]$Id, [scriptblock]$Present, [string[]]$Extra = @()) {
     Update-SessionPath
@@ -79,12 +78,53 @@ if (-not (Test-Path $authKeys)) { New-Item -ItemType File -Path $authKeys -Force
 icacls.exe $authKeys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "icacls failed with exit code $LASTEXITCODE" }
 
-# PowerShell 7 (the machine-wide MSI, not the per-user Store build), then make it the
-# SSH default shell.
+# SSH default shell: PowerShell 7 from the machine-wide MSI when available, else Windows
+# PowerShell 5.1. winget's Microsoft.PowerShell is not used: it installs the MSIX build
+# under WindowsApps, which sshd (running as SYSTEM) cannot rely on. Never throws.
 $pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
-Install-Winget 'Microsoft.PowerShell' { Test-Path $pwsh } @('--scope', 'machine')
+$winPwsh = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+
+# Installs the latest stable PowerShell MSI from the official GitHub release.
+# Returns $true when $pwsh exists afterwards; any failure is a warning and $false.
+function Install-PwshMsi {
+    $msi = Join-Path $env:TEMP 'pwsh.msi'
+    try {
+        # Windows PowerShell 5.1 defaults to TLS 1.0/1.1, which GitHub rejects.
+        [Net.ServicePointManager]::SecurityProtocol = `
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
+            'ARM64' { 'arm64' }
+            'AMD64' { 'x64' }
+            default { throw "unsupported architecture $env:PROCESSOR_ARCHITECTURE" }
+        }
+        $release = Invoke-RestMethod -UseBasicParsing -UserAgent 'devctl-vm-setup' `
+            -Uri 'https://api.github.com/repos/PowerShell/PowerShell/releases/latest'
+        $ver = ([string]$release.tag_name).TrimStart('v')
+        if ($ver -notmatch '^\d+\.\d+\.\d+$') { throw "unexpected release tag '$($release.tag_name)'" }
+        $url = "https://github.com/PowerShell/PowerShell/releases/download/v$ver/PowerShell-$ver-win-$arch.msi"
+        Invoke-WebRequest -UseBasicParsing -UserAgent 'devctl-vm-setup' -Uri $url -OutFile $msi
+        $p = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
+            -ArgumentList '/i', "`"$msi`"", '/qn', 'ADD_PATH=1'
+        if ($p.ExitCode -eq 3010) { $script:RebootNeeded = $true }
+        elseif ($p.ExitCode -ne 0) { throw "msiexec exited with code $($p.ExitCode)" }
+        if (-not (Test-Path $pwsh)) { throw "MSI installed, but $pwsh is missing" }
+        return $true
+    } catch {
+        Write-Warning "PowerShell 7 MSI install failed: $($_.Exception.Message)"
+        return $false
+    } finally {
+        Remove-Item -Path $msi -Force -ErrorAction SilentlyContinue
+    }
+}
+
+if ((Test-Path $pwsh) -or (Install-PwshMsi)) {
+    $defaultShell = $pwsh
+} else {
+    Write-Warning "Falling back to Windows PowerShell as the SSH shell ($winPwsh)."
+    $defaultShell = $winPwsh
+}
 New-Item -Path 'HKLM:\SOFTWARE\OpenSSH' -Force | Out-Null
-New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value $pwsh `
+New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value $defaultShell `
     -PropertyType String -Force | Out-Null
 Restart-Service sshd
 

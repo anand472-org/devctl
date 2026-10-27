@@ -1,6 +1,7 @@
 #!/bin/sh
-# ssh.sh <env>: run `just ci` on the working tree on an SSH host (Windows, pwsh as the
-# remote shell), starting its UTM VM first when `vm` is set.
+# ssh.sh <env>: run `just ci` on the working tree on an SSH host (Windows; the remote
+# shell is PowerShell 7 or Windows PowerShell 5.1, so remote commands avoid PS7-only syntax),
+# starting its UTM VM first when `vm` is set.
 set -eu
 cd "$(dirname "$0")/../.."
 . scripts/test-local/config.sh
@@ -44,4 +45,5 @@ fi
 make_tree_tar
 ssh "$host" "\$ErrorActionPreference='Stop'; if (Test-Path '$workdir') { Get-ChildItem -Force '$workdir' | Remove-Item -Recurse -Force } else { New-Item -ItemType Directory '$workdir' | Out-Null }"
 ssh "$host" "tar -xf - -C '$workdir'" < "$TREE_TAR"
-ssh "$host" "\$ErrorActionPreference='Stop'; Set-Location '$workdir'; rustup toolchain install; if (\$LASTEXITCODE) { exit \$LASTEXITCODE }; mise trust; if (\$LASTEXITCODE) { exit \$LASTEXITCODE }; mise install; if (\$LASTEXITCODE) { exit \$LASTEXITCODE }; just ci; exit \$LASTEXITCODE"
+# Native commands only: no Stop preference (5.1 turns native stderr into errors); exit codes via if.
+ssh "$host" "Set-Location '$workdir'; if (-not \$?) { exit 1 }; rustup toolchain install; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }; mise trust; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }; mise install; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }; just ci; exit \$LASTEXITCODE"

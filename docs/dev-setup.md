@@ -18,7 +18,7 @@ Dev tools (`just`, the gitoxide CLI) come from [mise](https://mise.jdx.dev), pin
 
 ## Windows (x64 and arm64)
 
-1. Install the tools: `winget install Git.Git Microsoft.PowerShell jdx.mise Rustlang.Rustup`.
+1. Install the tools: `winget install Git.Git jdx.mise Rustlang.Rustup`.
 2. Install Visual Studio Build Tools with the C++ workload (the MSVC linker Rust needs, `Microsoft.VisualStudio.Workload.VCTools`).
 3. Add `C:\Program Files\Git\bin` and `C:\Program Files\Git\usr\bin` to the user `Path`, so `just` finds `sh` and `bash` from pwsh, and recipes (including `#!/usr/bin/env bash` shebang recipes) find coreutils such as `env`, `mkdir` and `cp`.
 4. Run `git config --global core.longpaths true`.
@@ -44,7 +44,11 @@ One-time setup, by hand:
 
 1. `brew install --cask utm`.
 2. In UTM, create a VM named `devctl-win` from the Windows 11 ARM64 ISO (Microsoft's download page; activation isn't needed): 4 CPUs, 8 GB RAM, 80 GB disk, shared network. Create a local user (any name).
-3. In the VM, run `scripts/test-local/windows-vm-setup.ps1` as Administrator, then reboot. It is idempotent. It checks each tool by the file or command it needs, not by `winget list`: sshd needs the machine-wide PowerShell at `C:\Program Files\PowerShell\7\pwsh.exe`, so a Microsoft Store copy (`where pwsh` pointing into `WindowsApps`) does not count, and the script installs the MSI with `--scope machine --force` next to it.
+3. In the VM, run `scripts/test-local/windows-vm-setup.ps1` as Administrator, then reboot. It is idempotent. It checks each tool by the file or command it needs, not by `winget list`: the SSH shell must be a machine-wide path that sshd (running as SYSTEM) can use. winget's `Microsoft.PowerShell` installs the MSIX build under `WindowsApps`, which is not reliable for that, so the script does not use it. It uses `C:\Program Files\PowerShell\7\pwsh.exe` if present; otherwise it downloads and installs the latest stable PowerShell MSI from the official GitHub release; and if that fails (no network, API rate limit, install error) it warns and sets Windows PowerShell 5.1 (`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`) as the SSH shell. The remote commands work under both. To install PowerShell 7 yourself (replace `<ver>`, and `arm64` with `x64` on x64), then re-run the script:
+
+   ```powershell
+   iwr "https://github.com/PowerShell/PowerShell/releases/download/v<ver>/PowerShell-<ver>-win-arm64.msi" -OutFile $env:TEMP\pwsh.msi; Start-Process msiexec -ArgumentList '/i', "$env:TEMP\pwsh.msi", '/qn', 'ADD_PATH=1' -Wait
+   ```
 4. On the Mac, add an `~/.ssh/config` entry `Host devctl-win` with the VM's IP, your Windows user name (quoted if it contains spaces, e.g. `User "Jane Doe"`) and an `IdentityFile`, and append the Mac's public key (one line) to `C:\ProgramData\ssh\administrators_authorized_keys` in the VM. The first Windows user is an administrator, so sshd reads that file, not `~\.ssh\authorized_keys`; the setup script creates it and fixes its permissions.
 
 Done when `ssh devctl-win "just --version"` prints `just 1.59.0`. If `utmctl` or the `devctl-win` host is missing, `just test-local windows` fails with "SSH host devctl-win not reachable".
