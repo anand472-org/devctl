@@ -1,6 +1,10 @@
 //! The `just` recipe contract (spec section 5): run `coverage` (then `test`
 //! if it wrote no `JUnit`) in a measuring worktree, collect and normalize the
 //! LCOV and `JUnit` outputs, and classify the result into a record [`Status`].
+//!
+//! Required recipes are detected with `just --summary`, which omits private
+//! recipes (`[private]` or a leading `_`); a private `coverage` or `test`
+//! is reported as missing.
 
 use std::fmt::Write as _;
 use std::io::Read;
@@ -32,9 +36,16 @@ pub struct RecipeRun<'a> {
 /// How one recipe run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecipeExit {
-    Exited { success: bool, stderr_tail: String },
+    Exited {
+        success: bool,
+        stderr_tail: String,
+    },
     Cancelled,
-    TimedOut,
+    /// Killed after `RecipeRun::timeout`; `stderr_tail` shows what it was
+    /// doing.
+    TimedOut {
+        stderr_tail: String,
+    },
 }
 
 /// What [`run_contract`] produced.
@@ -61,15 +72,21 @@ const STDERR_TAIL_BYTES: usize = 4096;
 const CANCEL_POLL: Duration = Duration::from_secs(1);
 /// How often the child is checked for exit and the timeout.
 const WAIT_TICK: Duration = Duration::from_millis(50);
-/// How long to wait for the stderr reader after the recipe ends. A
-/// background process the recipe left behind can hold the pipe open forever.
+/// How long to wait for the stderr reader after the recipe ends. Leftover
+/// processes are killed with the tree, but one that escaped it (e.g. via
+/// `setsid`) could hold the pipe open forever.
 const READER_JOIN: Duration = Duration::from_secs(2);
 
 /// Whether the worktree root itself holds a justfile (`justfile` in any case,
 /// or `.justfile`). Without one, `just` would search parent directories and
 /// could find the main repository's justfile.
 fn has_justfile(root: &Path) -> anyhow::Result<bool> {
-    let unreadable = || format!("cannot read worktree directory {}", root.display());
+    let unreadable = || {
+        format!(
+            "cannot read worktree directory {}; check its permissions, or delete it and run `devctl record`",
+            root.display()
+        )
+    };
     for entry in std::fs::read_dir(root).with_context(unreadable)? {
         let name = entry
             .with_context(unreadable)?
@@ -83,12 +100,32 @@ fn has_justfile(root: &Path) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+/// `just` settings from the environment that would change which justfile,
+/// directory, shell or dotenv file is used, or stop recipes from running.
+const JUST_ENV: [&str; 14] = [
+    "JUST_JUSTFILE",
+    "JUST_JUSTFILE_NAME",
+    "JUST_WORKING_DIRECTORY",
+    "JUST_CEILING",
+    "JUST_SHELL",
+    "JUST_DOTENV_COMMAND",
+    "JUST_DOTENV_FILENAME",
+    "JUST_DOTENV_PATH",
+    "JUST_NO_DOTENV",
+    "JUST_DRY_RUN",
+    "JUST_NO_DEPS",
+    "JUST_ALLOW_MISSING",
+    "JUST_GROUP",
+    "JUST_QUIET",
+];
+
 /// A `just` command in `root` with repository-selecting git variables
-/// removed: devctl may run inside a git hook, and recipes must see the
-/// measuring worktree, not the hook's repository.
+/// removed (devctl may run inside a git hook, and recipes must see the
+/// measuring worktree, not the hook's repository) and with the developer's
+/// `just` overrides ([`JUST_ENV`]) removed.
 fn just_command(just: &JustCommand, root: &Path) -> Command {
     let mut cmd = just.command();
-    for var in crate::git::REPO_ENV {
+    for var in crate::git::REPO_ENV.into_iter().chain(JUST_ENV) {
         cmd.env_remove(var);
     }
     cmd.current_dir(root).stdin(Stdio::null());
@@ -207,6 +244,11 @@ fn wait_for(run: &RecipeRun, child: &mut Child) -> anyhow::Result<Waited> {
     let mut next_poll = start;
     loop {
         if let Some(status) = child.try_wait().context("cannot wait for recipe")? {
+            // Kill whatever the recipe left running, so it cannot hold the
+            // stderr pipe or files in the worktree. Safe after reaping: on
+            // Unix the group id cannot be reused while members live, and on
+            // Windows the open `child` handle prevents pid reuse.
+            let _ = run.platform.kill_tree(child.id());
             return Ok(Waited::Exited(status.success()));
         }
         let now = Instant::now();
@@ -286,9 +328,16 @@ pub fn run_recipe(run: &RecipeRun, name: &str) -> anyhow::Result<RecipeExit> {
         }
         Waited::TimedOut => {
             tracing::warn!("recipe timed out");
-            RecipeExit::TimedOut
+            RecipeExit::TimedOut { stderr_tail }
         }
     })
+}
+
+fn unreadable_dir(dir: &Path) -> String {
+    format!(
+        "cannot read {}; check permissions on the measuring worktree, or delete it and run `devctl record`",
+        dir.display()
+    )
 }
 
 /// Files in `root/dir` with extension `ext` (any case), sorted by name.
@@ -297,13 +346,11 @@ fn outputs(root: &Path, dir: &str, ext: &str) -> anyhow::Result<Vec<PathBuf>> {
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("cannot read {}", dir.display())),
+        Err(e) => return Err(e).with_context(|| unreadable_dir(&dir)),
     };
     let mut files = Vec::new();
     for entry in entries {
-        let path = entry
-            .with_context(|| format!("cannot read {}", dir.display()))?
-            .path();
+        let path = entry.with_context(|| unreadable_dir(&dir))?.path();
         let matches = path
             .extension()
             .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case(ext));
@@ -393,8 +440,27 @@ pub fn collect(
         if !prefix.ends_with('/') {
             prefix.push('/');
         }
-        let merged =
-            Report::merge(&reports).map_paths(|sf| relativize(platform, root, &prefix, sf));
+        let mut dropped = 0_usize;
+        let mut examples = Vec::new();
+        let merged = Report::merge(&reports).map_paths(|sf| {
+            let rel = relativize(platform, root, &prefix, sf);
+            if rel.is_none() {
+                dropped += 1;
+                if examples.len() < 2 {
+                    examples.push(sf.to_string());
+                }
+            }
+            rel
+        });
+        if dropped > 0 {
+            tracing::warn!(
+                target: crate::telemetry::PATH_TARGET,
+                dropped,
+                examples = ?examples,
+                "dropped LCOV files outside the worktree"
+            );
+            tracing::warn!(dropped, "dropped LCOV files outside the worktree");
+        }
         raw.lcov = merged.to_lcov();
         Some(merged)
     };
@@ -470,7 +536,8 @@ fn timeout_message(name: &str, timeout: Duration) -> String {
         format!("{:.2}", timeout.as_secs_f64() / 60.0)
     };
     format!(
-        "recipe `{name}` exceeded record.timeout_minutes ({minutes}); its process tree was killed"
+        "recipe `{name}` exceeded record.timeout_minutes ({minutes}); its process tree was killed. \
+         Raise record.timeout_minutes in .devctl.toml or make `just {name}` faster"
     )
 }
 
@@ -488,7 +555,12 @@ fn clear_dir(root: &Path, dir: &str) -> anyhow::Result<()> {
     match std::fs::remove_dir_all(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("cannot remove stale {}", path.display())),
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "cannot remove stale {}; check permissions on the measuring worktree, or delete it and run `devctl record`",
+                path.display()
+            )
+        }),
     }
 }
 
@@ -533,7 +605,19 @@ pub fn run_contract(run: &RecipeRun) -> anyhow::Result<ContractResult> {
                 }
             }
             RecipeExit::Cancelled => return Ok(ContractResult::Cancelled),
-            RecipeExit::TimedOut => return Ok(done_error(&timeout_message(name, run.timeout))),
+            RecipeExit::TimedOut { stderr_tail } => {
+                let _ = write!(
+                    stderr,
+                    "`just {name}` was killed:\n{}",
+                    stderr_tail.trim_end()
+                );
+                return Ok(ContractResult::Done {
+                    status: error_with_stderr(&timeout_message(name, run.timeout), &stderr),
+                    report: None,
+                    tests: None,
+                    raw: RawReports::default(),
+                });
+            }
         }
     }
 
@@ -748,6 +832,24 @@ mod tests {
                     "{var} not removed: {envs:?}"
                 );
             }
+            for var in [
+                "JUST_JUSTFILE",
+                "JUST_JUSTFILE_NAME",
+                "JUST_WORKING_DIRECTORY",
+                "JUST_CEILING",
+                "JUST_SHELL",
+                "JUST_DOTENV_COMMAND",
+                "JUST_DOTENV_FILENAME",
+                "JUST_DOTENV_PATH",
+                "JUST_NO_DOTENV",
+                "JUST_DRY_RUN",
+            ] {
+                assert!(
+                    envs.iter()
+                        .any(|(k, v)| *k == std::ffi::OsStr::new(var) && v.is_none()),
+                    "{var} not removed: {envs:?}"
+                );
+            }
         }
     }
 
@@ -852,12 +954,13 @@ mod tests {
 
     /// The recipe starts a background loop that appends to `beat` and then
     /// blocks; after the run returns, `beat` must stop growing.
-    const HANGING: &str = "coverage:\n    sh -c 'while true; do echo x >> beat; sleep 0.1; done' &\n    sleep 30\n\ntest:\n    true\n";
+    const HANGING: &str = "coverage:\n    sh -c 'while true; do echo x >> beat; sleep 0.1; done' &\n    echo waiting-on-something >&2\n    sleep 30\n\ntest:\n    true\n";
 
     fn assert_tree_dead(root: &Path) {
         let beat = root.join("beat");
         let len = || std::fs::metadata(&beat).map_or(0, |m| m.len());
         let before = len();
+        assert!(before > 0, "heartbeat never started");
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(before, len(), "background process still running");
     }
@@ -889,6 +992,16 @@ mod tests {
         );
         assert!(text.contains("its process tree was killed"), "{text}");
         assert!(
+            text.contains(
+                "Raise record.timeout_minutes in .devctl.toml or make `just coverage` faster"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("waiting-on-something"),
+            "stderr tail kept: {text}"
+        );
+        assert!(
             start.elapsed() < Duration::from_secs(4),
             "{:?}",
             start.elapsed()
@@ -900,8 +1013,36 @@ mod tests {
     fn timeout_message_uses_minutes() {
         assert_eq!(
             timeout_message("coverage", Duration::from_secs(600)),
-            "recipe `coverage` exceeded record.timeout_minutes (10); its process tree was killed"
+            "recipe `coverage` exceeded record.timeout_minutes (10); its process tree was killed. \
+             Raise record.timeout_minutes in .devctl.toml or make `just coverage` faster"
         );
+    }
+
+    #[test]
+    fn leftover_background_processes_killed_after_exit() {
+        let f = Fixture::new(
+            "coverage:\n    sh -c 'while true; do echo x >> beat; sleep 0.1; done' &\n    sleep 30 &\n    sleep 0.3\n",
+        );
+        let run = RecipeRun {
+            platform: f.platform.as_ref(),
+            just: &f.just,
+            root: f.root(),
+            commit: "abc123",
+            timeout: Duration::from_secs(60),
+            cancel: &|| false,
+        };
+        let start = Instant::now();
+        let exit = run_recipe(&run, "coverage").unwrap();
+        assert!(
+            matches!(exit, RecipeExit::Exited { success: true, .. }),
+            "{exit:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_tree_dead(f.root());
     }
 
     #[test]
@@ -954,11 +1095,10 @@ mod tests {
             event: &tracing::Event<'_>,
             _ctx: tracing_subscriber::layer::Context<'_, S>,
         ) {
+            let mut seen = self.0.lock().unwrap();
+            seen.push(format!("target:{}", event.metadata().target()));
             for field in event.metadata().fields() {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push(format!("field:{}", field.name()));
+                seen.push(format!("field:{}", field.name()));
             }
         }
     }
@@ -993,5 +1133,29 @@ mod tests {
             "{seen:?}"
         );
         assert!(seen.contains(&"field:recipe".to_string()), "{seen:?}");
+    }
+
+    #[test]
+    fn dropped_lcov_paths_are_warned() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let f = Fixture::new("");
+        f.write(
+            &["coverage", "x.info"],
+            "SF:/elsewhere/b.rs\nDA:1,1\nend_of_record\nSF:a.rs\nDA:1,1\nend_of_record\n",
+        );
+        // See recipe_run_span_and_duration_metric.
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+        let cap = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(cap.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            collect(f.root(), f.platform.as_ref()).unwrap();
+        });
+        let seen = cap.0.lock().unwrap().clone();
+        assert!(
+            seen.contains(&format!("target:{}", crate::telemetry::PATH_TARGET)),
+            "{seen:?}"
+        );
+        assert!(seen.contains(&"field:examples".to_string()), "{seen:?}");
+        assert!(seen.contains(&"field:dropped".to_string()), "{seen:?}");
     }
 }
