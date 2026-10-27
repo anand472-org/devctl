@@ -13,6 +13,13 @@ toml = "1.1.8"
 regex = "1.13.1"
 serde_path_to_error = "0.1.20"
 tracing = "0.1"
+opentelemetry = "0.33.1"
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "logs", "metrics"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs", "metrics"] }
+opentelemetry-appender-tracing = "0.33.1"
+tracing-opentelemetry = { version = "0.34.0", features = ["metrics"] }
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tempfile = "3.27.0"
 fastrand = "2.4.1"
 quick-xml = "0.42.0"
@@ -37,6 +44,14 @@ anyhow.workspace = true
 clap.workspace = true
 gix.workspace = true
 regex.workspace = true
+tracing.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry-appender-tracing.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
 serde.workspace = true
 serde_path_to_error.workspace = true
 toml.workspace = true
@@ -49,6 +64,7 @@ devctl-store.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

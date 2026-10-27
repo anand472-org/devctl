@@ -19,13 +19,15 @@ fmt:
 
 # Fails if any dependency, on any target platform, is a -sys crate or needs a C
 # build step. linux-raw-sys and windows-sys are allowed: they are pure-Rust
-# syscall/API declarations that compile no C.
+# syscall/API declarations that compile no C. js-sys and web-sys are allowed too:
+# wasm-bindgen declarations that the OTLP HTTP client pulls in for wasm targets;
+# they compile no C either.
 check-pure:
     #!/usr/bin/env bash
     set -euo pipefail
     if cargo tree --locked --workspace --target all -e normal,build,dev --prefix none \
         | grep -E -- '-sys |^cc |^cmake|^bindgen' \
-        | grep -vE '^(linux-raw-sys|windows-sys) '; then
+        | grep -vE '^(linux-raw-sys|windows-sys|js-sys|web-sys) '; then
         echo "error: non-pure-Rust dependencies found (listed above)" >&2
         exit 1
     fi
