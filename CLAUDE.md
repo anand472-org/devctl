@@ -51,7 +51,9 @@ Uses git-flow-next (`git flow`) with the classic preset, configured in `.git/con
 
 ## CI
 
-`.github/workflows/` contains the Claude Code GitHub Actions, both authenticated with the `ANTHROPIC_API_KEY` repo secret:
+`.github/workflows/ci.yml` runs fmt, clippy, tests and the pure-Rust dependency check on PRs and on pushes to `dev` and `master`.
+
+The Claude Code GitHub Actions are both authenticated with the `ANTHROPIC_API_KEY` repo secret:
 
 - `claude-code-review.yml` — runs the `code-review` plugin on every PR.
 - `claude.yml` — responds to `@claude` mentions in issues and PR comments.
