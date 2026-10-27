@@ -32,14 +32,39 @@ just test-local [env...]  # just ci in each env of test-envs.toml: podman contai
 - `crates/devctl-platform` — the only place `cfg(target_os = …)`, `cfg(unix)`, `cfg(windows)` (and `cfg!` forms) may appear; enforced by `just check-cfg`.
 - `crates/devctl-lcov` — LCOV coverage report parsing.
 - `crates/devctl-junit` — JUnit XML test report parsing.
-- `crates/devctl-store` — the on-disk store (access under `.git/devctl/`).
+- `crates/devctl-store` — the record store (`trait Store`, `RedbStore` on redb; postcard values, ruzstd-compressed raw reports, retention).
 
-The CLI:
+The `devctl` package (commands: `record`, `status`, `gate`, `hooks install`, `version`; hidden `hook <name>` and `worker --branch <b>`):
 
 - `src/cli.rs` — the `Cli` parser and `Command` subcommand enum. Add a subcommand by adding a variant here.
-- `src/lib.rs` — `run(&Cli)` dispatches each `Command` variant to its handler; errors propagate as `anyhow::Result`.
+- `src/lib.rs` — `run(&Cli)` dispatches each `Command` variant to its handler; repository-bound commands open a session (`Ctx` + telemetry) first. Errors propagate as `anyhow::Result`.
 - `src/main.rs` — thin entry point: parses args, calls `run`, prints `error: …` and exits non-zero on failure.
-- `tests/cli.rs` — integration tests that run the built binary through `assert_cmd`.
+- `src/config.rs` — loads and validates `.devctl.toml` (policy only; spec section 6 defaults).
+- `src/telemetry.rs` — `tracing` subscriber: rotated local logs always, OTLP/HTTP export when configured.
+- `src/git.rs` — `trait Repo` / `GixRepo` (reads via gix) and the `git` CLI helper.
+- `src/ctx.rs` — `Ctx` (repo, platform, config, dirs), `DevctlDirs` (paths under `.git/devctl/`), `slug()`.
+- `src/recipes.rs` — the `just` recipe contract: runs `coverage`/`test`, collects LCOV and JUnit, classifies the status.
+- `src/record/` — `queue.rs` (per-branch job file), `measure.rs` (measuring worktrees), `worker.rs` (lock, drain loop, cancellation, tree reuse, spawning the detached worker), `mod.rs` (`devctl record`).
+- `src/status.rs` — `devctl status` and the shared one-line record summary.
+- `src/gate/` — the pre-push rules (`mod.rs`) and new-code coverage (`coverage.rs`); also `devctl gate`.
+- `src/commit_size.rs` — the pre-commit size rule.
+- `src/hooks.rs` — `devctl hooks install` and `devctl hook <name>` dispatch.
+- `src/test_support.rs` — `#[cfg(test)]` `TestRepo` helper; `tests/support/mod.rs` is its copy for integration tests.
+- `tests/*.rs` — integration tests that run the built binary through `assert_cmd`; `tests/e2e.rs` is the end-to-end suite (below).
+
+### Hooks and `.git/devctl/`
+
+`devctl hooks install` writes three `#!/bin/sh` scripts into `<common dir>/hooks` that `exec devctl hook <name>` (so `devctl` must be on the PATH git runs hooks with). It stops, printing the line to add, if a hook already exists with other content or `core.hooksPath` is set.
+
+- `pre-commit` — blocks a commit of more than `commit.max_files` files or `commit.max_lines` or more changed lines; `git commit --no-verify` bypasses it.
+- `post-commit` — queues the commit and starts a detached `devctl worker`; never fails the commit.
+- `pre-push` — the gate (branch name, no delete/rewrite/merge commits on protected branches, record, tests, new-code coverage); waits for or runs the record; fails closed.
+
+Everything else lives in `.git/devctl/` (the common git dir, shared by all worktrees; branch `/` becomes `-` in names): `store.redb` (records), `queue/<branch>` (newest commit to record), `locks/<branch>.lock` (worker lock) and `<branch>.queue.lock`, `measure/<branch>` (measuring worktree), `logs/<process>.<date>.log` (rotated logs; the first place to look when a background record misbehaves).
+
+### End-to-end tests
+
+`tests/e2e.rs` drives a sample repo (`tests/fixtures/e2e/`: a POSIX-`sh` `justfile` that copies the prepared LCOV/JUnit of `fixture/` into place, plus `cases/*`) through real `git commit` and `git push` to a local bare remote with the hooks installed, covering the M1 exit criteria. They run as part of `just test` (filter with `just test --test e2e`) and need `git` and `just` (≥ 1.59.0) on PATH; the tests prepend the built `devctl` binary's directory to PATH for the hooks. Background records are awaited by polling with deadlines, and each test waits for its workers to go idle before its temp dirs are removed. Log lines are flushed by a background thread when a process exits, so assert on logs by polling (`wait_log`), not right after `devctl status` shows a record.
 
 Git access goes through the `gix` crate (gitoxide), not `git2`/libgit2. The `git` CLI is used only for `worktree add/remove/prune`, `checkout` inside a measuring worktree, and (M2) push/fetch/rebase; tests may use it freely to build fixture repos. It is on default features, which cover local repository operations only. gix's network transports all pull in C-backed code (curl/OpenSSL, or `ring` under rustls), which fails `just check-pure`, so remote operations need a deliberate exception to the purity rule.
 

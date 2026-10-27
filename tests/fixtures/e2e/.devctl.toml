@@ -1,0 +1,11 @@
+# The defaults, except a short record timeout, so a hung recipe fails a test
+# within minutes instead of hanging it.
+[gate]
+new_code_coverage = 95
+
+[commit]
+max_files = 10
+max_lines = 500
+
+[record]
+timeout_minutes = 2
