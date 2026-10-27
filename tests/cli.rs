@@ -47,7 +47,7 @@ fn repository_command_outside_a_repository_fails_cleanly() {
     devctl()
         .current_dir(dir.path())
         .env_remove("GIT_DIR")
-        .arg("probe")
+        .arg("record")
         .assert()
         .failure()
         .stderr(contains("error: "))
@@ -63,7 +63,7 @@ fn repository_command_writes_its_log_under_the_common_dir() {
     devctl()
         .current_dir(t.path())
         .env_remove("GIT_DIR")
-        .arg("probe")
+        .args(["worker", "--branch", "dev"])
         .assert()
         .success();
     let logs = t.path().join(".git").join("devctl").join("logs");
@@ -73,7 +73,7 @@ fn repository_command_writes_its_log_under_the_common_dir() {
         .collect();
     assert!(
         names.iter().any(|n| {
-            n.starts_with("cli.")
+            n.starts_with("worker.")
                 && std::path::Path::new(n)
                     .extension()
                     .is_some_and(|e| e == "log")
