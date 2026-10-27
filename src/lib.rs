@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod ctx;
 pub mod git;
+pub mod recipes;
 pub mod telemetry;
 
 #[cfg(test)]
