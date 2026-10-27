@@ -219,6 +219,17 @@ fn failed_test_blocks() {
 }
 
 #[test]
+fn non_zero_exit_without_failed_test_blocks() {
+    let f = Fixture::new();
+    f.t.checkout_new("feature/x");
+    f.t.write("fixture/exit-code", "1\n");
+    let head = f.t.commit("recipe exits 1");
+    f.hook(&new_feature(&head)).failure().stdout(contains(
+        "BLOCK tests: a recipe exited non-zero with no failed test\n",
+    ));
+}
+
+#[test]
 fn low_new_code_coverage_blocks() {
     let f = Fixture::new();
     let head = f.feature(&[4, 5, 6]);
@@ -257,7 +268,10 @@ fn record_error_blocks() {
     let head = f.t.commit("broken recipe");
     f.hook(&new_feature(&head))
         .failure()
-        .stdout(contains("BLOCK record: no JUnit output"))
+        .stdout(contains(
+            "BLOCK record: exit \"$(cat fixture/exit-code)\" \u{2014} `just coverage` exited \
+             non-zero and wrote no JUnit XML; fix the error above, then run `devctl record`",
+        ))
         .stdout(contains("skip  tests: "))
         .stdout(contains(
             "push blocked for feature/x: fix the recipe, then run `devctl record`",

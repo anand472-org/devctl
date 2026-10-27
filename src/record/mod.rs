@@ -24,8 +24,9 @@ pub fn now_ms() -> i64 {
 }
 
 /// The next-newest record after `id` (in `history`, newest first) that is of
-/// a different commit than `record`: a re-record of the same commit is not
-/// "previous". Shared by `record` and `status`.
+/// a different commit than `record` and not an error: a re-record of the
+/// same commit is not "previous", and an error record's coverage is not a
+/// measurement. Shared by `record` and `status`.
 pub(crate) fn previous_record<'a>(
     history: &'a [(RecordId, Record)],
     id: RecordId,
@@ -35,14 +36,15 @@ pub(crate) fn previous_record<'a>(
         .iter()
         .skip_while(|(i, _)| *i != id)
         .skip(1)
-        .find(|(_, r)| r.commit != record.commit)
+        .find(|(_, r)| r.commit != record.commit && !matches!(r.status, Status::Error { .. }))
         .map(|(_, r)| r)
 }
 
 /// What `devctl record` prints and how it ended.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordSummary {
-    /// The `format_summary` line(s).
+    /// The `format_summary` line(s); for an `error` record, followed by the
+    /// whole stored stderr tail.
     pub text: String,
     pub status: Status,
 }
@@ -103,8 +105,13 @@ pub fn run_record(ctx: &Ctx, rev: Option<&str>) -> Result<RecordSummary> {
             )
         })?;
     let previous = previous_record(&history, id, &record);
+    let mut text = format_summary(&record, previous, now_ms());
+    if let Status::Error { stderr_tail } = &record.status {
+        text.push_str("\n\nrecipe output and error (last 4096 bytes):\n");
+        text.push_str(stderr_tail.trim_end());
+    }
     Ok(RecordSummary {
-        text: format_summary(&record, previous, now_ms()),
+        text,
         status: record.status,
     })
 }
@@ -237,6 +244,37 @@ mod tests {
             "{}",
             out.text
         );
+    }
+
+    #[test]
+    fn error_record_prints_the_whole_stderr_tail() {
+        let t = fixture_repo(false);
+        t.write(
+            "justfile",
+            "coverage:\n    @echo first-line >&2\n    @echo 'compile error: x' >&2\n    @exit 2\n\ntest:\n    true\n",
+        );
+        t.commit("one");
+        let ctx = Ctx::open(t.path(), Box::new(FakePlatform::new())).unwrap();
+        let out = run_record(&ctx, None).unwrap();
+        let Status::Error { stderr_tail } = &out.status else {
+            panic!("{:?}", out.status)
+        };
+        let (summary, rest) = out.text.split_once("\n\n").unwrap();
+        assert!(
+            summary.ends_with(
+                "\n    error: compile error: x \u{2014} `just coverage` exited non-zero and wrote \
+                 no JUnit XML; fix the error above, then run `devctl record`"
+            ),
+            "{summary}"
+        );
+        assert_eq!(
+            rest,
+            format!(
+                "recipe output and error (last 4096 bytes):\n{}",
+                stderr_tail.trim_end()
+            )
+        );
+        assert!(rest.contains("first-line\ncompile error: x\n"), "{rest}");
     }
 
     #[test]

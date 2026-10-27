@@ -150,7 +150,7 @@ Rules:
 
 - If `coverage` already wrote JUnit XML, `just test` is skipped so tests run once.
 - Exit codes: non-zero with JUnit output means tests failed (status `tests_failed`). Non-zero without JUnit output, or no LCOV output, means status `error`.
-- A missing required recipe stops with: "missing recipe `coverage`; run `devctl init`". `devctl` never runs commands of its own instead.
+- A missing required recipe stops with: "missing recipe `coverage`; add it to the justfile (`devctl init` will generate one in M2)". `devctl` never runs commands of its own instead.
 - Minimum `just` version: 1.59.0, checked by `Platform::just()`.
 - LCOV `SF` paths are made relative to the worktree root and use `/` separators. Files outside the worktree are dropped.
 - Recipes get `DEVCTL=1` and `DEVCTL_COMMIT=<commit>` in their environment.
@@ -227,6 +227,8 @@ Values are serialized with serde + `postcard`.
 - `pre-commit` fails closed: an unreadable index or an invalid `.devctl.toml` blocks the commit with the reason. It is skipped while a merge is in progress. `git commit --amend` is measured as the index against HEAD, so only newly staged changes count, not the amended commit's own.
 - `pre-push` fails closed: a record error, missing `just`, a missing recipe or an unreadable store blocks the push with a specific message and fix.
 - A recipe that exceeds `record.timeout_minutes` has its process tree killed (`Platform::kill_tree`) and is stored as `error`.
+- An `error` record keeps the recipes' stderr followed by devctl's message. `devctl record` prints all of it; `devctl status` and the gate show one line: the last line the recipe printed, then devctl's message (e.g. "compile error: x — `just coverage` exited non-zero and wrote no JUnit XML; …").
+- Ctrl+C during a foreground recording (`devctl record`, `devctl gate`, `pre-push`) kills the recipe's process tree and fails with "interrupted; the recording was cancelled". Outside a recipe, Ctrl+C exits at once.
 - A corrupt store is reported with its path. It's a local cache: deleting it and recording again is the fix.
 - Every message names what failed, why, and the next command to run.
 
@@ -244,7 +246,7 @@ On Windows, Linux and macOS, each on x64 and arm64, in CI:
 ## 8. Telemetry
 
 - **Instrumentation:** all code uses `tracing`. Spans: hook, worker run, recipe run, parse, store transaction, gate rule, git command. Notable steps are events.
-- **Local logs (always on):** `.git/devctl/logs/<process>.log`, rotated.
+- **Local logs (always on):** `.git/devctl/logs/<process>.<date>.log`, rotated daily (`<process>` is `cli`, `worker` or `hook-<name>`).
 - **Export (off by default):** OTLP over HTTP with protobuf, enabled by `telemetry.endpoint` or the standard `OTEL_EXPORTER_OTLP_ENDPOINT`. `OTEL_SDK_DISABLED` and `OTEL_SERVICE_NAME` are respected.
   - Logs via `opentelemetry-appender-tracing`; traces via `tracing-opentelemetry`.
   - Metrics: `devctl.record.duration` (histogram, by status), `devctl.recipe.duration` (histogram, by recipe), `devctl.gate.result` (counter, by rule and outcome), `devctl.store.busy_retries` (counter), `devctl.worker.cancelled` (counter).
