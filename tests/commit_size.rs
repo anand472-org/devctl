@@ -212,14 +212,11 @@ mod real_git {
             format!("#!/bin/sh\nOTEL_SDK_DISABLED=true exec '{bin}' hook pre-commit\n"),
         )
         .unwrap();
-        // Git for Windows runs hooks through its shell and ignores the mode.
-        let status = std::process::Command::new("chmod")
-            .arg("755")
-            .arg(&path)
-            .status();
-        if let Ok(s) = status {
-            assert!(s.success(), "chmod failed");
-        }
+        // A no-op on Windows: Git for Windows runs hooks through its shell
+        // and ignores the mode.
+        devctl_platform::current()
+            .make_executable(&path)
+            .expect("make the hook executable");
     }
 
     fn commit(t: &TestRepo, args: &[&str]) -> std::process::Output {
@@ -258,6 +255,29 @@ mod real_git {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn amend_measures_the_index_against_head() {
+        let t = repo();
+        install_hook(&t);
+        stage_files(&t, 11);
+        t.git(&["commit", "-q", "--no-verify", "-m", "big"]);
+        // Nothing newly staged: rewording an 11-file commit is allowed.
+        let out = commit(&t, &["--amend"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Newly staged changes are what count, not the amended commit's own.
+        for i in 0..11 {
+            t.write(&format!("g{i:02}.txt"), "x\n");
+        }
+        t.git(&["add", "-A"]);
+        let out = commit(&t, &["--amend"]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("BLOCK commit-size: 11 files"));
     }
 
     #[test]

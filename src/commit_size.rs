@@ -80,6 +80,9 @@ fn render(check: &SizeCheck, violated: &[String]) -> String {
 /// Prints nothing when the commit is allowed, the block text to stderr
 /// otherwise. Returns `false` to block. Skipped while a merge is in progress.
 ///
+/// `git commit --amend` is measured like any commit: the index against HEAD,
+/// so only newly staged changes count, not the amended commit's own.
+///
 /// # Errors
 /// If the staged changes cannot be read.
 pub fn run_pre_commit(ctx: &Ctx) -> Result<bool> {
