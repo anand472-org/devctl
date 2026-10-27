@@ -78,10 +78,22 @@ fn reuse(
     let Some((found_id, found)) = found else {
         return Ok(None);
     };
-    let raw = store.raw(found_id).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "cannot read the reused record's raw reports");
-        None
-    });
+    let raw = match store.raw(found_id) {
+        Ok(Some(raw)) => raw,
+        // Pruned by retention: a copy would have no LCOV for the gate, so
+        // measure instead.
+        Ok(None) => {
+            tracing::info!(
+                from = found_id,
+                "the record of an identical tree has no raw reports; recording instead"
+            );
+            return Ok(None);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot read the raw reports of an identical tree's record; recording instead");
+            return Ok(None);
+        }
+    };
     let record = Record {
         commit: commit.as_bytes().to_vec(),
         branch: branch.to_string(),
@@ -89,7 +101,7 @@ fn reuse(
         finished_at_ms: now_ms(),
         ..found
     };
-    let id = store_record(ctx, &record, raw.as_ref())?;
+    let id = store_record(ctx, &record, Some(&raw))?;
     tracing::info!(
         from = found_id,
         id,
@@ -622,6 +634,28 @@ pub(crate) mod tests {
             store.record_for(amended.as_bytes()).unwrap().map(|r| r.0),
             Some(id)
         );
+    }
+
+    #[test]
+    fn tree_record_without_raw_is_not_reused() {
+        // The gate re-records a commit whose raw reports were pruned; copying
+        // the same raw-less record would leave it with nothing to measure.
+        let t = fixture_repo(false);
+        let head = oid(&t.commit("one"));
+        let ctx = ctx_of(&t);
+        record_commit(&ctx, "dev", head, Reuse::Allow, &never).unwrap();
+        let policy = RetentionPolicy {
+            records_per_branch: 10,
+            raw_reports_days: 0,
+        };
+        ctx.store().prune(&policy, now_ms() + 1).unwrap();
+        let Outcome::Recorded(id, _) =
+            record_commit(&ctx, "dev", head, Reuse::Allow, &never).unwrap()
+        else {
+            panic!("expected Recorded");
+        };
+        assert_eq!(runs(&ctx, "dev"), 2);
+        assert!(ctx.store().raw(id).unwrap().is_some());
     }
 
     #[test]

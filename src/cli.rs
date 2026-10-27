@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "devctl", version, about, propagate_version = true)]
@@ -24,6 +24,12 @@ pub enum Command {
         #[arg(long)]
         branch: Option<String>,
     },
+    /// Run the pre-push rules for the current branch tip without pushing
+    Gate {
+        /// The branch the push would update (default: the current branch)
+        #[arg(long)]
+        target: Option<String>,
+    },
     /// The background recorder for one branch. Internal: started by the
     /// `post-commit` hook.
     #[command(hide = true)]
@@ -32,6 +38,36 @@ pub enum Command {
         #[arg(long)]
         branch: String,
     },
+    /// Runs a git hook. Internal: called by the scripts `devctl hooks
+    /// install` writes.
+    #[command(hide = true)]
+    Hook {
+        /// The hook git is running
+        name: HookName,
+        /// The arguments git passed to the hook
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+/// The git hooks devctl implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookName {
+    PostCommit,
+    PreCommit,
+    PrePush,
+}
+
+impl HookName {
+    /// The hook's git name (`pre-push`, ...).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HookName::PostCommit => "post-commit",
+            HookName::PreCommit => "pre-commit",
+            HookName::PrePush => "pre-push",
+        }
+    }
 }
 
 #[cfg(test)]
