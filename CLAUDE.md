@@ -20,20 +20,28 @@ just test <name>       # single test by name filter
 just lint              # fmt --check + clippy -D warnings (clippy::pedantic is on)
 just fmt
 just check-pure        # fail on non-pure-Rust dependencies
-just ci                # lint + test + check-pure, same as CI
+just check-cfg         # fail on target_os/unix/windows cfg outside crates/devctl-platform
+just ci                # lint + test + check-pure + check-cfg, same as CI
 just test-local [env...]  # just ci in each env of test-envs.toml: podman container, UTM Windows VM, this Mac (default: all enabled)
 ```
 
 ## Architecture
 
-`devctl` is a clap-derive CLI:
+`devctl` is a cargo workspace: the root `devctl` package (a clap-derive CLI) plus library crates under `crates/`, all sharing `[workspace.lints]` and `[workspace.dependencies]`:
+
+- `crates/devctl-platform` — the only place `cfg(target_os = …)`, `cfg(unix)`, `cfg(windows)` (and `cfg!` forms) may appear; enforced by `just check-cfg`.
+- `crates/devctl-lcov` — LCOV coverage report parsing.
+- `crates/devctl-junit` — JUnit XML test report parsing.
+- `crates/devctl-store` — the on-disk store (access under `.git/devctl/`).
+
+The CLI:
 
 - `src/cli.rs` — the `Cli` parser and `Command` subcommand enum. Add a subcommand by adding a variant here.
 - `src/lib.rs` — `run(&Cli)` dispatches each `Command` variant to its handler; errors propagate as `anyhow::Result`.
 - `src/main.rs` — thin entry point: parses args, calls `run`, prints `error: …` and exits non-zero on failure.
 - `tests/cli.rs` — integration tests that run the built binary through `assert_cmd`.
 
-Git access goes through the `gix` crate (gitoxide), not `git2`/libgit2 or shelling out to `git`. It is on default features, which cover local repository operations only. gix's network transports all pull in C-backed code (curl/OpenSSL, or `ring` under rustls), which fails `just check-pure`, so remote operations need a deliberate exception to the purity rule.
+Git access goes through the `gix` crate (gitoxide), not `git2`/libgit2. The `git` CLI is used only for `worktree add/remove/prune`, `checkout` inside a measuring worktree, and (M2) push/fetch/rebase; tests may use it freely to build fixture repos. It is on default features, which cover local repository operations only. gix's network transports all pull in C-backed code (curl/OpenSSL, or `ring` under rustls), which fails `just check-pure`, so remote operations need a deliberate exception to the purity rule.
 
 ## Purity constraints
 

@@ -343,9 +343,29 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "clap",
+ "devctl-junit",
+ "devctl-lcov",
+ "devctl-platform",
+ "devctl-store",
  "gix",
  "predicates",
 ]
+
+[[package]]
+name = "devctl-junit"
+version = "0.1.0"
+
+[[package]]
+name = "devctl-lcov"
+version = "0.1.0"
+
+[[package]]
+name = "devctl-platform"
+version = "0.1.0"
+
+[[package]]
+name = "devctl-store"
+version = "0.1.0"
 
 [[package]]
 name = "difflib"

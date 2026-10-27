@@ -8,11 +8,11 @@ run *args:
     cargo run -- {{args}}
 
 test *filter:
-    cargo test --locked {{filter}}
+    cargo test --locked --workspace {{filter}}
 
 lint:
     cargo fmt --check
-    cargo clippy --locked --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets -- -D warnings
 
 fmt:
     cargo fmt
@@ -23,7 +23,7 @@ fmt:
 check-pure:
     #!/usr/bin/env bash
     set -euo pipefail
-    if cargo tree --locked --target all -e normal,build,dev --prefix none \
+    if cargo tree --locked --workspace --target all -e normal,build,dev --prefix none \
         | grep -E -- '-sys |^cc |^cmake|^bindgen' \
         | grep -vE '^(linux-raw-sys|windows-sys) '; then
         echo "error: non-pure-Rust dependencies found (listed above)" >&2
@@ -31,8 +31,21 @@ check-pure:
     fi
     echo "ok: all dependencies are pure Rust"
 
+# Fails if platform-specific cfg (target_os, unix, windows) appears outside
+# crates/devctl-platform/.
+check-cfg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if grep -rnE 'cfg!?\(.*(target_os|unix|windows)' --include='*.rs' \
+        --exclude-dir=devctl-platform --exclude-dir=target \
+        --exclude-dir=.superpowers --exclude-dir=.worktrees --exclude-dir=.git .; then
+        echo "error: platform cfg found outside crates/devctl-platform/ (listed above)" >&2
+        exit 1
+    fi
+    echo "ok: no platform cfg outside crates/devctl-platform"
+
 # Everything CI runs.
-ci: lint test check-pure
+ci: lint test check-pure check-cfg
 
 # Run `just ci` in each environment of test-envs.toml (default: every enabled one):
 # podman container, SSH host (the UTM Windows VM), or this machine. Not part of `ci`:
