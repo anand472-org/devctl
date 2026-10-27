@@ -8,7 +8,7 @@ Prefer using the LSP tool over text-grep for code navigation, finding references
 
 Rust toolchain is pinned in `rust-toolchain.toml`. On this machine `cargo` lives in `~/.cargo/bin`, which is not on the default shell PATH — prefix commands with `PATH="$HOME/.cargo/bin:$PATH"`.
 
-Dev tools are pinned as cargo aliases in `.cargo/config.toml` and installed repo-locally into the gitignored `.tools/bin`: `just`, and the gitoxide CLI (`gix`, `ein`) built with its `max-pure` feature. From the repo root, run `cargo install-just && cargo install-gix`, then put `.tools/bin` on PATH. To add a tool, add an `install-<name>` alias with `--locked --root .tools` and an exact version. Cargo ignores `install.root` from the repo config, so `--root` must be in each alias.
+Dev tools (`just`, and the gitoxide CLI `gix`/`ein` built with its `max-pure` feature) are pinned in `mise.toml`, with checksums for all six platforms in `mise.lock`. Run `mise install` from the repo root. To add a tool, add it to `mise.toml` for all six platforms and re-run `mise lock --platform windows-x64,windows-arm64,macos-x64,macos-arm64,linux-x64,linux-arm64`. Rust stays on rustup. Per-OS setup is in `docs/dev-setup.md`.
 
 Recipes live in the `justfile`:
 
@@ -59,7 +59,7 @@ Uses git-flow-next (`git flow`) with the classic preset, configured in `.git/con
 
 ## CI
 
-`.github/workflows/ci.yml` runs `just ci` on PRs and on pushes to `dev` and `master`. `.tools` is cached, keyed on `.cargo/config.toml` and `rust-toolchain.toml`, so changing a tool version or the toolchain rebuilds the tools.
+`.github/workflows/ci.yml` runs `just ci` on PRs and on pushes to `dev` and `master`, as a matrix over six runners (Windows, macOS and Linux, each x64 and arm64). `jdx/mise-action` installs and caches the dev tools from `mise.toml`/`mise.lock`.
 
 The Claude Code GitHub Actions are both authenticated with the `ANTHROPIC_API_KEY` repo secret:
 
