@@ -9,6 +9,7 @@ use devctl_store::RedbStore;
 
 use crate::config::Config;
 use crate::git::{GixRepo, Repo};
+use crate::interrupt::{self, Interrupt};
 
 /// A branch name made safe for one path component: `/` becomes `-`
 /// (`feature/x` -> `feature-x`). `feature/x` and `feature-x` share a slug; that
@@ -72,6 +73,8 @@ pub struct Ctx {
     pub platform: Box<dyn Platform>,
     pub config: Config,
     pub dirs: DevctlDirs,
+    /// Ctrl+C state; [`crate::interrupt::GLOBAL`] outside tests.
+    pub interrupt: &'static Interrupt,
 }
 
 impl Ctx {
@@ -106,6 +109,7 @@ impl Ctx {
             platform,
             config,
             dirs,
+            interrupt: &interrupt::GLOBAL,
         })
     }
 

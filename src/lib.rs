@@ -5,6 +5,7 @@ pub mod ctx;
 pub mod gate;
 pub mod git;
 pub mod hooks;
+pub mod interrupt;
 pub mod recipes;
 pub mod record;
 pub mod status;
@@ -134,6 +135,7 @@ pub fn run(cli: &Cli) -> Result<()> {
             &Process::Cli,
             || tracing::info_span!("devctl.cli", command = "record"),
             |ctx| {
+                interrupt::install();
                 let out = record::run_record(ctx, commit.as_deref())?;
                 println!("{}", out.text);
                 if let Status::Error { .. } = out.status {
@@ -167,6 +169,7 @@ pub fn run(cli: &Cli) -> Result<()> {
                 &Process::Cli,
                 || tracing::info_span!("devctl.cli", command = "gate"),
                 |ctx| {
+                    interrupt::install();
                     let report = gate::run_gate(ctx, target.as_deref())?;
                     print!("{}", report.text);
                     Ok(report)
