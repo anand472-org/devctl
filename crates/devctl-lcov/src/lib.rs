@@ -4,8 +4,10 @@
 //! and the summary records (`LF`, `LH`, `FNF`, `FNH`, `BRF`, `BRH`) are
 //! ignored; summaries are recomputed from the data. Repeated `DA`, `FNDA` and
 //! `BRDA` entries for the same key (within a record or across records for the
-//! same `SF`) are summed. Hit counts are `u64`; a negative, non-numeric or
-//! overflowing count is a [`ParseError`].
+//! same `SF`) are summed. Hit counts are `u64`: negative counts (emitted by
+//! gcov/lcov in multithreaded runs) clamp to 0, counts above `u64::MAX`
+//! saturate, and a non-numeric count is a [`ParseError`]. A leading UTF-8 BOM
+//! and whitespace around each line are ignored.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -53,6 +55,22 @@ fn err(line: usize, reason: impl Into<String>) -> ParseError {
     }
 }
 
+/// Parses a hit count: negatives clamp to 0, overflow saturates, non-numeric is an error.
+fn hits(s: &str, what: &str, line: usize) -> Result<u64, ParseError> {
+    let t = s.trim();
+    let (neg, digits) = match t.strip_prefix('-') {
+        Some(d) => (true, d),
+        None => (false, t),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(err(line, format!("invalid {what} {s:?}")));
+    }
+    if neg {
+        return Ok(0);
+    }
+    Ok(digits.parse().unwrap_or(u64::MAX))
+}
+
 fn num<T: std::str::FromStr>(s: &str, what: &str, line: usize) -> Result<T, ParseError> {
     s.trim()
         .parse()
@@ -68,9 +86,14 @@ fn num<T: std::str::FromStr>(s: &str, what: &str, line: usize) -> Result<T, Pars
 pub fn parse(input: &str) -> Result<Report, ParseError> {
     let mut report = Report::default();
     let mut current: Option<String> = None;
-    for (idx, raw) in input.lines().enumerate() {
+    for (idx, raw) in input
+        .strip_prefix('\u{feff}')
+        .unwrap_or(input)
+        .lines()
+        .enumerate()
+    {
         let n = idx + 1;
-        let line = raw.trim_end_matches('\r');
+        let line = raw.trim();
         let Some((tag, rest)) = line.split_once(':') else {
             if line == "end_of_record" {
                 current = None;
@@ -96,7 +119,7 @@ pub fn parse(input: &str) -> Result<Report, ParseError> {
                     return Err(err(n, "DA needs line,hits"));
                 }
                 let l: u32 = num(fields[0], "line number", n)?;
-                let h: u64 = num(fields[1], "hit count", n)?;
+                let h = hits(fields[1], "hit count", n)?;
                 let e = file.lines.entry(l).or_insert(0);
                 *e = e.saturating_add(h);
             }
@@ -123,7 +146,7 @@ pub fn parse(input: &str) -> Result<Report, ParseError> {
                 let Some((h, name)) = rest.split_once(',') else {
                     return Err(err(n, "FNDA needs hits,name"));
                 };
-                let h: u64 = num(h, "hit count", n)?;
+                let h = hits(h, "hit count", n)?;
                 let f = file
                     .functions
                     .entry(name.to_string())
@@ -137,7 +160,7 @@ pub fn parse(input: &str) -> Result<Report, ParseError> {
                 let l: u32 = num(fields[0], "line number", n)?;
                 let taken = match fields[3].trim() {
                     "-" => None,
-                    t => Some(num::<u64>(t, "taken count", n)?),
+                    t => Some(hits(t, "taken count", n)?),
                 };
                 let key = (l, fields[1].to_string(), fields[2].to_string());
                 let e = file.branches.entry(key).or_insert(None);
@@ -220,10 +243,13 @@ impl Report {
             let _ = writeln!(s, "LF:{}\nLH:{}", c.coverable, c.covered);
             for ((l, block, branch), t) in &f.branches {
                 match t {
-                    Some(t) => writeln!(s, "BRDA:{l},{block},{branch},{t}"),
-                    None => writeln!(s, "BRDA:{l},{block},{branch},-"),
+                    Some(t) => {
+                        let _ = writeln!(s, "BRDA:{l},{block},{branch},{t}");
+                    }
+                    None => {
+                        let _ = writeln!(s, "BRDA:{l},{block},{branch},-");
+                    }
                 }
-                .ok();
             }
             let _ = writeln!(s, "BRF:{}", f.branches.len());
             let _ = writeln!(
