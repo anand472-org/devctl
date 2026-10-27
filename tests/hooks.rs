@@ -45,7 +45,8 @@ fn post_commit_detached_is_noop_and_exits_zero() {
 fn post_commit_never_fails() {
     let t = TestRepo::new();
     t.commit("one");
-    // A corrupt store, and a queue "directory" that is a file.
+    // A corrupt store (post-commit never opens it), and a queue "directory"
+    // that is a file, which is what makes the enqueue fail.
     let root = t.path().join(".git").join("devctl");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("store.redb"), "not a database").unwrap();
@@ -97,4 +98,78 @@ fn post_commit_outside_a_repo_exits_zero() {
     post_commit(dir.path())
         .success()
         .stderr(predicates::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn post_commit_with_invalid_config_exits_zero() {
+    let t = TestRepo::new();
+    t.commit("one");
+    t.write(".devctl.toml", "[gate]\nnew_code_coverage = 500\n");
+    post_commit(t.path()).success();
+}
+
+#[test]
+fn unknown_hook_name_is_a_usage_error() {
+    let t = TestRepo::new();
+    Command::cargo_bin("devctl")
+        .unwrap()
+        .current_dir(t.path())
+        .args(["hook", "bogus"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn post_commit_does_not_wait_for_a_dead_collector() {
+    let t = TestRepo::new();
+    let sha = t.commit("one");
+    t.git(&["checkout", "-q", "--detach", &sha]);
+    // A listener that accepts and never answers.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let start = std::time::Instant::now();
+    let mut cmd = Command::cargo_bin("devctl").unwrap();
+    cmd.current_dir(t.path())
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint)
+        .timeout(Duration::from_secs(30));
+    for var in support::REPO_ENV {
+        cmd.env_remove(var);
+    }
+    cmd.args(["hook", "post-commit"]).assert().success();
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "took {:?}",
+        start.elapsed()
+    );
+    drop(listener);
+}
+
+#[test]
+fn install_repairs_crlf_and_rejects_a_hooks_file() {
+    let t = TestRepo::new();
+    let hooks = t.path().join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(
+        hooks.join("pre-push"),
+        "#!/bin/sh\r\nexec devctl hook pre-push \"$@\"\r\n",
+    )
+    .unwrap();
+    let install = || {
+        let mut cmd = Command::cargo_bin("devctl").unwrap();
+        cmd.current_dir(t.path()).env("OTEL_SDK_DISABLED", "true");
+        for var in support::REPO_ENV {
+            cmd.env_remove(var);
+        }
+        cmd.args(["hooks", "install"]);
+        cmd
+    };
+    install().assert().success();
+    let text = std::fs::read_to_string(hooks.join("pre-push")).unwrap();
+    assert_eq!(text, "#!/bin/sh\nexec devctl hook pre-push \"$@\"\n");
+    std::fs::remove_dir_all(&hooks).unwrap();
+    std::fs::write(&hooks, "file").unwrap();
+    install()
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is not a directory; remove it"));
 }

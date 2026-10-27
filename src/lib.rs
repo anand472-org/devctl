@@ -46,11 +46,14 @@ impl Process {
         }
     }
 
-    /// 2 s for `pre-push` (the developer is waiting on git), else 5 s.
+    /// 2 s for `pre-push` (the developer is waiting on git), 200 ms for
+    /// `post-commit` (a commit must not stall; the worker carries the trace),
+    /// else 5 s.
     #[must_use]
     pub fn flush_timeout(&self) -> Duration {
         match self {
             Process::Hook(h) if h == "pre-push" => Duration::from_secs(2),
+            Process::Hook(h) if h == "post-commit" => Duration::from_millis(200),
             _ => Duration::from_secs(5),
         }
     }
@@ -202,7 +205,7 @@ mod tests {
         );
         assert_eq!(
             Process::Hook("post-commit".into()).flush_timeout(),
-            Duration::from_secs(5)
+            Duration::from_millis(200)
         );
         assert_eq!(Process::Cli.flush_timeout(), Duration::from_secs(5));
         assert_eq!(Process::Worker.flush_timeout(), Duration::from_secs(5));

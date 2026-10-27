@@ -60,13 +60,19 @@ pub fn run_hook(name: HookName, args: &[String]) -> Result<()> {
             // nowhere to log, so say it on stderr (the hook script discards
             // it).
             let process = Process::Hook(name.as_str().to_string());
-            let result = in_session(
-                &process,
-                || tracing::info_span!("hook", name = name.as_str()),
-                post_commit,
-            );
-            if let Err(e) = result {
-                eprintln!("devctl post-commit: {e:#}");
+            let outcome = std::panic::catch_unwind(|| {
+                in_session(
+                    &process,
+                    || tracing::info_span!("hook", name = name.as_str()),
+                    post_commit,
+                )
+            });
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("devctl post-commit: {e:#}"),
+                Err(_) => {
+                    eprintln!("devctl post-commit: internal error (panic); commit unaffected");
+                }
             }
             Ok(())
         }
@@ -113,14 +119,27 @@ pub fn install(ctx: &Ctx) -> Result<()> {
         );
     }
     let dir = ctx.repo.common_dir().join("hooks");
+    if dir.exists() && !dir.is_dir() {
+        bail!(
+            "`{}` is not a directory; remove it, then run `devctl hooks install`",
+            dir.display()
+        );
+    }
     let mut conflicts = Vec::new();
-    let mut missing = Vec::new();
+    // Hooks to (re)write: missing, or identical but for CRLF line endings.
+    let mut to_write = Vec::new();
     for name in HOOKS {
         let path = dir.join(name);
         match std::fs::read(&path) {
-            Ok(existing) if existing == script(name).as_bytes() => {}
-            Ok(_) => conflicts.push(add_line(&path, name)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(name),
+            Ok(existing) => {
+                let text = String::from_utf8_lossy(&existing).replace("\r\n", "\n");
+                if text != script(name) {
+                    conflicts.push(add_line(&path, name));
+                } else if existing != script(name).as_bytes() {
+                    to_write.push(name);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => to_write.push(name),
             Err(e) => {
                 return Err(e).with_context(|| {
                     format!("cannot read {}; check its permissions", path.display())
@@ -134,20 +153,26 @@ pub fn install(ctx: &Ctx) -> Result<()> {
             conflicts.join("\n")
         );
     }
-    if missing.is_empty() {
-        println!("devctl hooks are already installed in {}", dir.display());
-        return Ok(());
-    }
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create {}; check its permissions", dir.display()))?;
-    for name in missing {
+    for name in HOOKS {
         let path = dir.join(name);
-        std::fs::write(&path, script(name))
-            .with_context(|| format!("cannot write {}; check its permissions", path.display()))?;
+        let wrote = to_write.contains(&name);
+        if wrote {
+            std::fs::write(&path, script(name)).with_context(|| {
+                format!("cannot write {}; check its permissions", path.display())
+            })?;
+        }
+        // Also for hooks already in place: repairs a lost executable bit.
         ctx.platform
             .make_executable(&path)
             .with_context(|| format!("cannot make {} executable", path.display()))?;
-        println!("installed {}", path.display());
+        if wrote {
+            println!("installed {}", path.display());
+        }
+    }
+    if to_write.is_empty() {
+        println!("devctl hooks are already installed in {}", dir.display());
     }
     Ok(())
 }
