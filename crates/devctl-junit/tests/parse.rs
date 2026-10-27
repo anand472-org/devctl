@@ -268,3 +268,13 @@ fn error_message_has_position() {
     let e = parse("<testsuite></testcase>").unwrap_err().to_string();
     assert!(e.contains("byte"), "{e}");
 }
+
+#[test]
+fn suite_inside_unknown_wrapper_is_counted() {
+    let xml = r"<report>
+        <testsuite name='ok'><testcase name='a'/></testsuite>
+        <wrapper><testsuite name='w'><testcase name='b'><failure/></testcase></testsuite></wrapper>
+        </report>";
+    assert_eq!(counts(xml).failed, 1);
+    assert_eq!(counts(xml).passed, 1);
+}
