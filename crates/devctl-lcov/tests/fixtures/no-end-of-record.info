@@ -1,0 +1,8 @@
+SF:src/a.rs
+DA:1,1
+DA:2,0
+end_of_record
+SF:src/b.rs
+DA:1,2
+DA:2,2
+DA:3,0
