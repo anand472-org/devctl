@@ -28,9 +28,10 @@ jobs:
         run: rustup toolchain install
 
       # Dev tools are pinned in .cargo/config.toml, so the cache key changes with them.
-      - name: Cache dev tools
+      # Restore and save are split so a fresh build is cached even if later steps fail.
+      - name: Restore dev tools
         id: tools-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .tools
           key: tools-${{ runner.os }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain.toml') }}
@@ -38,6 +39,13 @@ jobs:
       - name: Install dev tools
         if: steps.tools-cache.outputs.cache-hit != 'true'
         run: cargo install-just && cargo install-gix
+
+      - name: Save dev tools
+        if: steps.tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .tools
+          key: ${{ steps.tools-cache.outputs.cache-primary-key }}
 
       - name: Add dev tools to PATH
         run: echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"
