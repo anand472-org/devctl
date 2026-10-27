@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use devctl_store::Status;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, HooksAction};
 use ctx::Ctx;
 use git::Repo;
 
@@ -176,6 +176,13 @@ pub fn run(cli: &Cli) -> Result<()> {
             }
             Ok(())
         }
+        Command::Hooks {
+            action: HooksAction::Install,
+        } => in_session(
+            &Process::Cli,
+            || tracing::info_span!("devctl.cli", command = "hooks install"),
+            hooks::install,
+        ),
         Command::Hook { name, args } => hooks::run_hook(*name, args),
     }
 }

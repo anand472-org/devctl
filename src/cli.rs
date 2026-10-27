@@ -38,6 +38,11 @@ pub enum Command {
         #[arg(long)]
         branch: String,
     },
+    /// Manage the git hooks devctl uses
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
     /// Runs a git hook. Internal: called by the scripts `devctl hooks
     /// install` writes.
     #[command(hide = true)]
@@ -48,6 +53,14 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+}
+
+/// What `devctl hooks` can do.
+#[derive(Debug, Subcommand)]
+pub enum HooksAction {
+    /// Write the `pre-commit`, `post-commit` and `pre-push` hook scripts into
+    /// the repository's hooks directory
+    Install,
 }
 
 /// The git hooks devctl implements.

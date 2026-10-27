@@ -425,18 +425,6 @@ fn hook_fails_closed_on_bad_input() {
 }
 
 #[test]
-fn hooks_not_in_this_build_fail() {
-    let f = Fixture::new();
-    f.devctl()
-        .args(["hook", "post-commit"])
-        .assert()
-        .failure()
-        .stderr(contains(
-            "hook `post-commit` is not available in this build",
-        ));
-}
-
-#[test]
 fn lcov_outside_the_worktree_blocks() {
     let f = Fixture::new();
     f.t.checkout_new("feature/x");

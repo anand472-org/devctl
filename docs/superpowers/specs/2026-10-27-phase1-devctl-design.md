@@ -224,7 +224,7 @@ Values are serialized with serde + `postcard`.
 ### 7.3 Error handling
 
 - `post-commit` never fails. Problems go to the logs and to an `error` record, shown by `devctl status`.
-- `pre-commit` fails closed: an unreadable index or an invalid `.devctl.toml` blocks the commit with the reason. It is skipped while a merge is in progress.
+- `pre-commit` fails closed: an unreadable index or an invalid `.devctl.toml` blocks the commit with the reason. It is skipped while a merge is in progress. `git commit --amend` is measured as the index against HEAD, so only newly staged changes count, not the amended commit's own.
 - `pre-push` fails closed: a record error, missing `just`, a missing recipe or an unreadable store blocks the push with a specific message and fix.
 - A recipe that exceeds `record.timeout_minutes` has its process tree killed (`Platform::kill_tree`) and is stored as `error`.
 - A corrupt store is reported with its path. It's a local cache: deleting it and recording again is the fix.
