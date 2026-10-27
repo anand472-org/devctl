@@ -208,6 +208,15 @@ pub enum Outcome {
     Superseded,
 }
 
+/// Whether [`record_commit`] may copy a record of the same tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reuse {
+    /// Background recording and the gate (spec section 4.1, step 4).
+    Allow,
+    /// `devctl record`: always measure, so a flaky result can be re-run.
+    Never,
+}
+
 /// Records `commit` on `branch`.
 ///
 /// # Errors
@@ -216,6 +225,7 @@ pub fn record_commit(
     ctx: &Ctx,
     branch: &str,
     commit: ObjectId,
+    reuse_policy: Reuse,
     cancel: &dyn Fn() -> bool,
 ) -> Result<Outcome> {
     let span = tracing::info_span!("record.commit", branch, commit = %commit);
@@ -232,7 +242,9 @@ pub fn record_commit(
     };
     let measured = match tree {
         Some(tree) => {
-            if let Some(outcome) = reuse(ctx, branch, commit, tree, started_at_ms)? {
+            if reuse_policy == Reuse::Allow
+                && let Some(outcome) = reuse(ctx, branch, commit, tree, started_at_ms)?
+            {
                 return Ok(outcome);
             }
             let Some(m) = measure(ctx, branch, commit, cancel) else {
@@ -288,8 +300,10 @@ pub fn run_worker(ctx: &Ctx, branch: &str) -> Result<()> {
 /// [`run_worker`], calling `between` after each drain while the lock is
 /// still held (tests use it to queue a job at that moment).
 fn run_worker_with(ctx: &Ctx, branch: &str, between: &mut dyn FnMut()) -> Result<()> {
+    // The loop's next iteration is the re-check after release, so both the
+    // first acquire and the re-check retry.
     loop {
-        let Some(lock) = try_lock(ctx, branch)? else {
+        let Some(lock) = try_lock_retrying(ctx, branch)? else {
             tracing::info!(
                 branch,
                 "another worker holds the lock; leaving the job to it"
@@ -315,10 +329,30 @@ fn lock_error(ctx: &Ctx, branch: &str) -> String {
     )
 }
 
-fn try_lock(ctx: &Ctx, branch: &str) -> Result<Option<Lock>> {
+pub(crate) fn try_lock(ctx: &Ctx, branch: &str) -> Result<Option<Lock>> {
     ctx.platform
         .try_lock(&ctx.dirs.lock(branch))
         .with_context(|| lock_error(ctx, branch))
+}
+
+/// Attempts to take the worker lock before concluding a worker holds it.
+const LOCK_ATTEMPTS: u32 = 5;
+/// Pause between attempts.
+const LOCK_RETRY: Duration = Duration::from_millis(20);
+
+/// [`try_lock`], retried: [`worker_running`] (e.g. from `devctl status`)
+/// holds the lock for an instant, which must not make a new worker think
+/// another one is running and leave its job stranded.
+fn try_lock_retrying(ctx: &Ctx, branch: &str) -> Result<Option<Lock>> {
+    for attempt in 1..=LOCK_ATTEMPTS {
+        if let Some(lock) = try_lock(ctx, branch)? {
+            return Ok(Some(lock));
+        }
+        if attempt < LOCK_ATTEMPTS {
+            std::thread::sleep(LOCK_RETRY);
+        }
+    }
+    Ok(None)
 }
 
 /// Takes `branch`'s worker lock, waiting for a running worker to finish.
@@ -347,7 +381,7 @@ pub fn drain(ctx: &Ctx, branch: &str, _held: &Lock) -> Result<()> {
                 false
             }
         };
-        match record_commit(ctx, branch, commit, &cancel) {
+        match record_commit(ctx, branch, commit, Reuse::Allow, &cancel) {
             Ok(Outcome::Recorded(id, r) | Outcome::Reused(id, r)) => {
                 tracing::info!(id, status = status_name(&r.status), %commit, "job done");
             }
@@ -412,13 +446,92 @@ pub(crate) mod tests {
         "SF:src/a.rs\nDA:1,1\nDA:2,0\nDA:3,1\nend_of_record\nSF:src/b.rs\nDA:1,1\nend_of_record\n";
     pub(crate) const JUNIT: &str = r#"<testsuites><testsuite name="s"><testcase name="a" time="0.5"/><testcase name="b"><skipped/></testcase></testsuite></testsuites>"#;
 
-    /// `coverage` copies the committed fixtures into place; `test` is a no-op
-    /// (skipped anyway, since `coverage` writes `JUnit`).
+    /// `coverage` appends a line to the untracked `runs.log` (counting
+    /// measurements) and copies the committed fixtures into place; `test` is
+    /// a no-op (skipped anyway, since `coverage` writes `JUnit`).
     pub(crate) fn justfile(slow: bool) -> String {
         let wait = if slow { "    sleep 30\n" } else { "" };
         format!(
-            "coverage:\n{wait}    mkdir -p coverage test-results\n    cp fixture/cov.info coverage/cov.info\n    cp fixture/junit.xml test-results/junit.xml\n\ntest:\n    true\n"
+            "coverage:\n{wait}    echo run >> runs.log\n    mkdir -p coverage test-results\n    cp fixture/cov.info coverage/cov.info\n    cp fixture/junit.xml test-results/junit.xml\n\ntest:\n    true\n"
         )
+    }
+
+    /// How many times `coverage` ran in `branch`'s measuring worktree.
+    pub(crate) fn runs(ctx: &Ctx, branch: &str) -> usize {
+        std::fs::read_to_string(ctx.dirs.measure(branch).join("runs.log"))
+            .map_or(0, |s| s.lines().count())
+    }
+
+    /// A subscriber exporting to in-memory OpenTelemetry providers.
+    pub(crate) struct MemTelemetry {
+        pub dispatch: tracing::Dispatch,
+        pub guard: Option<crate::telemetry::Guard>,
+        pub metrics: opentelemetry_sdk::metrics::InMemoryMetricExporter,
+    }
+
+    impl MemTelemetry {
+        pub(crate) fn new() -> MemTelemetry {
+            use crate::telemetry;
+            use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
+            use opentelemetry_sdk::metrics::{
+                InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+            };
+            use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+
+            let cfg = crate::config::TelemetryCfg {
+                endpoint: String::new(),
+                include_paths: false,
+                log_level: "info".into(),
+            };
+            let settings = telemetry::Settings {
+                process: "test",
+                logs_dir: None,
+                cfg: &cfg,
+                flush_timeout: Duration::from_secs(1),
+                repo: None,
+            };
+            let metrics = InMemoryMetricExporter::default();
+            let exporters = telemetry::Exporters {
+                tracer: SdkTracerProvider::builder()
+                    .with_simple_exporter(InMemorySpanExporter::default())
+                    .build(),
+                logger: SdkLoggerProvider::builder()
+                    .with_simple_exporter(InMemoryLogExporter::default())
+                    .build(),
+                meter: SdkMeterProvider::builder()
+                    .with_reader(PeriodicReader::builder(metrics.clone()).build())
+                    .build(),
+            };
+            let (dispatch, guard) = telemetry::build_with(&settings, Some(exporters));
+            MemTelemetry {
+                dispatch,
+                guard: Some(guard),
+                metrics,
+            }
+        }
+
+        /// Flushes, then sums the `u64` counter `name` (0 if absent).
+        pub(crate) fn counter(&mut self, name: &str) -> u64 {
+            use opentelemetry_sdk::metrics::data::{
+                AggregatedMetrics, MetricData, ResourceMetrics, ScopeMetrics,
+            };
+            drop(self.guard.take());
+            let finished = self.metrics.get_finished_metrics().unwrap();
+            finished
+                .iter()
+                .flat_map(ResourceMetrics::scope_metrics)
+                .flat_map(ScopeMetrics::metrics)
+                .filter(|m| m.name() == name)
+                .map(|m| match m.data() {
+                    AggregatedMetrics::U64(MetricData::Sum(sum)) => sum
+                        .data_points()
+                        .map(opentelemetry_sdk::metrics::data::SumDataPoint::value)
+                        .sum::<u64>(),
+                    _ => panic!("{name} is not a u64 sum"),
+                })
+                .max()
+                .unwrap_or(0)
+        }
     }
 
     pub(crate) fn fixture_repo(slow: bool) -> TestRepo {
@@ -447,7 +560,9 @@ pub(crate) mod tests {
         let t = fixture_repo(false);
         let head = oid(&t.commit("one"));
         let ctx = ctx_of(&t);
-        let Outcome::Recorded(id, rec) = record_commit(&ctx, "dev", head, &never).unwrap() else {
+        let Outcome::Recorded(id, rec) =
+            record_commit(&ctx, "dev", head, Reuse::Allow, &never).unwrap()
+        else {
             panic!("expected Recorded");
         };
         assert_eq!(rec.status, Status::Ok);
@@ -475,7 +590,8 @@ pub(crate) mod tests {
         let t = fixture_repo(false);
         let first = oid(&t.commit("one"));
         let ctx = ctx_of(&t);
-        let Outcome::Recorded(_, before) = record_commit(&ctx, "dev", first, &never).unwrap()
+        let Outcome::Recorded(_, before) =
+            record_commit(&ctx, "dev", first, Reuse::Allow, &never).unwrap()
         else {
             panic!("expected Recorded");
         };
@@ -489,7 +605,8 @@ pub(crate) mod tests {
         ]);
         let amended = oid(&t.git(&["rev-parse", "HEAD"]));
         assert_ne!(amended, first);
-        let Outcome::Reused(id, after) = record_commit(&ctx, "feature/y", amended, &never).unwrap()
+        let Outcome::Reused(id, after) =
+            record_commit(&ctx, "feature/y", amended, Reuse::Allow, &never).unwrap()
         else {
             panic!("expected Reused");
         };
@@ -516,7 +633,9 @@ pub(crate) mod tests {
             Box::new(FakePlatform::new().with_just(Err(JustError::Missing))),
         )
         .unwrap();
-        let Outcome::Recorded(_, rec) = record_commit(&ctx, "dev", head, &never).unwrap() else {
+        let Outcome::Recorded(_, rec) =
+            record_commit(&ctx, "dev", head, Reuse::Allow, &never).unwrap()
+        else {
             panic!("expected Recorded");
         };
         let Status::Error { stderr_tail } = &rec.status else {
@@ -539,7 +658,9 @@ pub(crate) mod tests {
         t.write("f", "x\n");
         let head = oid(&t.commit("one"));
         let ctx = ctx_of(&t);
-        let Outcome::Recorded(_, rec) = record_commit(&ctx, "dev", head, &never).unwrap() else {
+        let Outcome::Recorded(_, rec) =
+            record_commit(&ctx, "dev", head, Reuse::Allow, &never).unwrap()
+        else {
             panic!("expected Recorded");
         };
         let Status::Error { stderr_tail } = &rec.status else {
@@ -559,13 +680,17 @@ pub(crate) mod tests {
         let b = oid(&t.commit("fast"));
         let ctx = ctx_of(&t);
         enqueue(&ctx, "dev", a).unwrap();
+        let mut telemetry = MemTelemetry::new();
         let start = Instant::now();
         std::thread::scope(|s| {
-            let worker = s.spawn(|| run_worker(&ctx, "dev"));
+            let dispatch = &telemetry.dispatch;
+            let worker =
+                s.spawn(|| tracing::dispatcher::with_default(dispatch, || run_worker(&ctx, "dev")));
             std::thread::sleep(Duration::from_secs(1));
             enqueue(&ctx, "dev", b).unwrap();
             worker.join().unwrap().unwrap();
         });
+        assert_eq!(telemetry.counter("devctl.worker.cancelled"), 1);
         assert!(
             start.elapsed() < Duration::from_secs(10),
             "{:?}",
@@ -600,6 +725,61 @@ pub(crate) mod tests {
         assert!(ctx.store().record_for(a.as_bytes()).unwrap().is_none());
         drop(held);
         assert!(!worker_running(&ctx, "dev").unwrap());
+    }
+
+    #[test]
+    fn probing_worker_running_does_not_strand_a_job() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        /// Stops the probes even when an assertion fails, so the scope ends.
+        struct StopOnDrop<'a>(&'a AtomicBool);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+
+        let t = fixture_repo(false);
+        let ctx = ctx_of(&t);
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let _stop = StopOnDrop(&stop);
+            // `status` probing the lock while hooks start workers.
+            for _ in 0..8 {
+                s.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = worker_running(&ctx, "dev");
+                    }
+                });
+            }
+            for i in 0..5 {
+                t.write("src/a.rs", format!("{i}\n"));
+                let c = oid(&t.commit(&format!("c{i}")));
+                enqueue(&ctx, "dev", c).unwrap();
+                run_worker(&ctx, "dev").unwrap();
+                assert!(
+                    ctx.store().record_for(c.as_bytes()).unwrap().is_some(),
+                    "job {i} stranded by a lock probe"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn reuse_never_measures_again() {
+        let t = fixture_repo(false);
+        let head = oid(&t.commit("one"));
+        let ctx = ctx_of(&t);
+        record_commit(&ctx, "dev", head, Reuse::Allow, &never).unwrap();
+        assert!(matches!(
+            record_commit(&ctx, "dev", head, Reuse::Allow, &never).unwrap(),
+            Outcome::Reused(..)
+        ));
+        assert_eq!(runs(&ctx, "dev"), 1);
+        assert!(matches!(
+            record_commit(&ctx, "dev", head, Reuse::Never, &never).unwrap(),
+            Outcome::Recorded(..)
+        ));
+        assert_eq!(runs(&ctx, "dev"), 2);
     }
 
     #[test]
@@ -665,50 +845,20 @@ pub(crate) mod tests {
 
     #[test]
     fn spawn_worker_passes_branch_and_traceparent() {
-        use crate::telemetry;
-        use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLoggerProvider};
-        use opentelemetry_sdk::metrics::{
-            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
-        };
-        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
-
         let t = TestRepo::new();
         t.commit("one");
         let fake = std::sync::Arc::new(FakePlatform::new());
         let ctx = Ctx::open(t.path(), Box::new(SharedFake(fake.clone()))).unwrap();
 
-        let cfg = crate::config::TelemetryCfg {
-            endpoint: String::new(),
-            include_paths: false,
-            log_level: "info".into(),
-        };
-        let settings = telemetry::Settings {
-            process: "hook-post-commit",
-            logs_dir: None,
-            cfg: &cfg,
-            flush_timeout: Duration::from_secs(1),
-            repo: None,
-        };
-        let exporters = telemetry::Exporters {
-            tracer: SdkTracerProvider::builder()
-                .with_simple_exporter(InMemorySpanExporter::default())
-                .build(),
-            logger: SdkLoggerProvider::builder()
-                .with_simple_exporter(InMemoryLogExporter::default())
-                .build(),
-            meter: SdkMeterProvider::builder()
-                .with_reader(PeriodicReader::builder(InMemoryMetricExporter::default()).build())
-                .build(),
-        };
-        let (dispatch, guard) = telemetry::build_with(&settings, Some(exporters));
-        let header = tracing::dispatcher::with_default(&dispatch, || {
+        let telemetry = MemTelemetry::new();
+        let header = tracing::dispatcher::with_default(&telemetry.dispatch, || {
             let span = tracing::info_span!("hook");
             span.in_scope(|| {
                 spawn_worker(&ctx, "feature/x").unwrap();
-                telemetry::traceparent().expect("traceparent")
+                crate::telemetry::traceparent().expect("traceparent")
             })
         });
-        drop(guard);
+        drop(telemetry);
 
         let spawned = fake.spawned();
         assert_eq!(spawned.len(), 1);
@@ -735,7 +885,7 @@ pub(crate) mod tests {
     }
 
     /// Lets a test keep a handle on the `FakePlatform` inside a `Ctx`.
-    struct SharedFake(std::sync::Arc<FakePlatform>);
+    pub(crate) struct SharedFake(pub std::sync::Arc<FakePlatform>);
 
     impl devctl_platform::Platform for SharedFake {
         fn spawn_detached(&self, cmd: std::process::Command) -> std::io::Result<u32> {
