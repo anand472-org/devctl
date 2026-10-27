@@ -3,6 +3,8 @@ pub mod config;
 pub mod ctx;
 pub mod git;
 pub mod recipes;
+pub mod record;
+pub mod status;
 pub mod telemetry;
 
 #[cfg(test)]
@@ -11,7 +13,8 @@ pub(crate) mod test_support;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use devctl_store::Status;
 
 use cli::{Cli, Command};
 use ctx::Ctx;
@@ -67,6 +70,10 @@ pub struct Session {
 pub fn open_session(cwd: &Path, process: &Process) -> Result<Session> {
     let ctx = Ctx::open(cwd, devctl_platform::current())?;
     let logs = ctx.dirs.logs();
+    // tracing-appender prints "Error reading the log directory" to stderr when
+    // pruning old files in a directory that does not exist yet. A failure here
+    // surfaces as the logger's own warning.
+    let _ = std::fs::create_dir_all(&logs);
     let repo = ctx.repo.remote_url_name();
     let name = process.name();
     let guard = telemetry::init(&telemetry::Settings {
@@ -82,30 +89,65 @@ pub fn open_session(cwd: &Path, process: &Process) -> Result<Session> {
     })
 }
 
+/// Runs `body` for a repository-bound command: opens a [`Session`] in the
+/// current directory, enters the span made by `span` (created once the
+/// subscriber is installed) and logs a failure with `tracing::error!` before
+/// telemetry is flushed. The error is still returned for `main` to print.
+fn in_session<T>(
+    process: &Process,
+    span: impl FnOnce() -> tracing::Span,
+    body: impl FnOnce(&Ctx) -> Result<T>,
+) -> Result<T> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let session = open_session(&cwd, process)?;
+    let span = span();
+    span.in_scope(|| {
+        let result = body(&session.ctx);
+        if let Err(e) = &result {
+            tracing::error!(error = %format!("{e:#}"), "command failed");
+        }
+        result
+    })
+}
+
 /// Dispatches a parsed command line to its subcommand handler. `version` runs
 /// without a repository or telemetry; every other command opens a
 /// [`Session`] first.
 ///
 /// # Errors
 ///
-/// Returns an error if the subcommand fails.
+/// Returns an error if the subcommand fails, including `record` producing an
+/// `error` record.
 pub fn run(cli: &Cli) -> Result<()> {
-    match cli.command {
+    match &cli.command {
         Command::Version => {
             println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::Probe => {
-            let cwd = std::env::current_dir().context("cannot read the current directory")?;
-            let session = open_session(&cwd, &Process::Cli)?;
-            let span = tracing::info_span!("devctl.cli", command = "probe");
-            let _entered = span.enter();
-            tracing::info!(
-                branch = session.ctx.repo.current_branch()?.as_deref(),
-                "probe"
-            );
-            Ok(())
-        }
+        Command::Record { commit } => in_session(
+            &Process::Cli,
+            || tracing::info_span!("devctl.cli", command = "record"),
+            |ctx| {
+                let out = record::run_record(ctx, commit.as_deref())?;
+                println!("{}", out.text);
+                if let Status::Error { .. } = out.status {
+                    bail!(
+                        "the record ended with status error (shown above); fix the cause, \
+                         then run `devctl record` again"
+                    );
+                }
+                Ok(())
+            },
+        ),
+        Command::Worker { branch } => in_session(
+            &Process::Worker,
+            || {
+                let span = tracing::info_span!("worker.run", branch = %branch);
+                telemetry::adopt_traceparent(&span);
+                span
+            },
+            |ctx| record::worker::run_worker(ctx, branch),
+        ),
     }
 }
 

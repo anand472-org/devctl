@@ -11,10 +11,21 @@ pub struct Cli {
 pub enum Command {
     /// Print the devctl version
     Version,
-    /// Open the repository context and telemetry, record one event, and exit.
-    /// Internal: lets tests exercise the repository-bound command path.
+    /// Record a commit (default HEAD) in its branch's measuring worktree and
+    /// print the summary
+    Record {
+        /// The commit to record (any revision, e.g. a hash or `HEAD~1`)
+        #[arg(long)]
+        commit: Option<String>,
+    },
+    /// The background recorder for one branch. Internal: started by the
+    /// `post-commit` hook.
     #[command(hide = true)]
-    Probe,
+    Worker {
+        /// The branch whose queue to record
+        #[arg(long)]
+        branch: String,
+    },
 }
 
 #[cfg(test)]

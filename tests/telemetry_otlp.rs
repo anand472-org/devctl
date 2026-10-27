@@ -1,7 +1,7 @@
 //! A repository-bound command exports a trace to a plain-HTTP OTLP collector
 //! when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and is unaffected by a dead
-//! collector. Uses the hidden `probe` command: `version` runs without
-//! telemetry.
+//! collector. Uses the hidden `worker` command with an empty queue: `version`
+//! runs without telemetry.
 
 mod support;
 
@@ -14,14 +14,16 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use support::TestRepo;
 
-/// `devctl probe` inside a fresh repository with one commit. The repository is
-/// returned so it outlives the command.
-fn probe() -> (Command, TestRepo) {
+/// `devctl worker --branch dev` (empty queue) inside a fresh repository with
+/// one commit; the repository is returned so it outlives the command.
+fn worker() -> (Command, TestRepo) {
     let t = TestRepo::new();
     t.write("f", "1\n");
     t.commit("one");
     let mut cmd = Command::cargo_bin("devctl").expect("devctl binary should build");
-    cmd.current_dir(t.path()).env_remove("GIT_DIR").arg("probe");
+    cmd.current_dir(t.path())
+        .env_remove("GIT_DIR")
+        .args(["worker", "--branch", "dev"]);
     (cmd, t)
 }
 
@@ -83,7 +85,7 @@ fn version_exports_a_trace_to_the_collector() {
         }
     });
 
-    let (mut cmd, _repo) = probe();
+    let (mut cmd, _repo) = worker();
     cmd.env(
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         format!("http://127.0.0.1:{port}"),
@@ -119,7 +121,7 @@ fn dead_collector_does_not_fail_or_slow_the_command() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
-    let (mut cmd, _repo) = probe();
+    let (mut cmd, _repo) = worker();
     let start = Instant::now();
     cmd.env(
         "OTEL_EXPORTER_OTLP_ENDPOINT",
