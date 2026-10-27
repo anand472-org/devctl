@@ -132,8 +132,8 @@ linux-arm64   = { asset_pattern = "gitoxide-max-pure-v*-aarch64-unknown-linux-mu
 ### Task 2: Local test environments (Linux container, Windows VM, Mac)
 
 **Files:**
-- Create: `scripts/test-local/{linux.sh, windows.sh, macos.sh, linux.Containerfile, windows-vm-setup.ps1}`
-- Modify: `justfile` (`test-local` recipe), `docs/dev-setup.md`, `CLAUDE.md`
+- Create: `test-envs.toml`, `scripts/test-local/{config.sh, container.sh, ssh.sh, local.sh, linux.Containerfile, windows-vm-setup.ps1}`
+- Modify: `justfile` (`test-local` recipe), `docs/dev-setup.md`, `CLAUDE.md`, spec section 10 (M2 row)
 
 **Interfaces:**
 - Consumes: `mise.toml`, `rust-toolchain.toml` from Task 1.
@@ -148,9 +148,35 @@ Machine facts this task relies on (checked 2026-10-27): Apple M1 Pro, macOS 27.2
   - `linux.sh`: `podman build -t devctl-test-linux -f scripts/test-local/linux.Containerfile scripts/test-local`, then `podman run --rm -i --platform linux/arm64` with named volumes `devctl-linux-rustup`, `devctl-linux-cargo`, `devctl-linux-mise` and `devctl-linux-target` (mounted at `CARGO_TARGET_DIR`) so later runs are incremental. If `podman machine list` doesn't show `Currently running`, it runs `podman machine start` first.
   - `windows.sh`: starts the VM with `utmctl start devctl-win11` if `utmctl status devctl-win11` isn't `started`, and waits up to 120 s for `ssh devctl-win exit`. It then runs `Remove-Item -Recurse -Force C:\devctl-work\*`, pipes the tar stream into `ssh devctl-win "tar -xf - -C C:/devctl-work"` (Windows' built-in bsdtar) and runs the commands in `C:\devctl-work`. If `utmctl` or the `devctl-win` host is missing, it fails with: "Windows VM not set up; see docs/dev-setup.md#local-windows-vm".
   - `macos.sh`: runs `just ci` in place, then `rustup target add x86_64-apple-darwin` and `cargo test --locked --workspace --target x86_64-apple-darwin`, which runs through Rosetta.
-- [ ] **Step 5:** Add the recipe `test-local *envs="linux windows macos"`. It runs each script in turn without stopping at the first failure, prints `PASS <env>` or `FAIL <env>`, and exits 1 if any failed. It is not part of `ci`, because CI runners have no podman or UTM.
+- [ ] **Step 4b: Parametrize (supersedes the per-OS script names in Step 4).** Environments are defined in `test-envs.toml` at the repo root, not hard-coded. Runners are generic per *kind*, so a project with only some environments (or none) can use them: `container.sh <name>`, `ssh.sh <name>`, `local.sh <name>`, each implementing the Step 4 behaviour from config values. `config.sh` provides `env_names` (enabled envs, file order) and `env_get <name> <key> [default]`, parsed with `awk` from this restricted TOML subset, documented at the top of the file: `[envs.<name>]` tables, `key = "string"` or `key = true|false`, `#` comments; anything else is an error naming the line. devctl's own file:
+
+```toml
+# Local test environments for `just test-local`. Restricted TOML: [envs.<name>] tables
+# with string or boolean values. M2 moves this into .devctl.toml and `devctl test`.
+[envs.linux]
+kind          = "container"        # container | ssh | local
+enabled       = true
+containerfile = "scripts/test-local/linux.Containerfile"
+image         = "devctl-test-linux"
+platform      = "linux/arm64"
+
+[envs.windows]
+kind    = "ssh"
+enabled = true
+host    = "devctl-win"             # ~/.ssh/config alias
+vm      = "devctl-win11"           # optional; started with utmctl when set
+workdir = "C:/devctl-work"
+
+[envs.macos]
+kind          = "local"
+enabled       = true
+extra_targets = "x86_64-apple-darwin"   # optional, space-separated; tests re-run per target
+```
+
+Kind-specific keys: `container` needs `containerfile`, `image`, `platform` (volumes are named `<project>-<name>-{rustup,cargo,mise,target}`, `<project>` = repo directory name); `ssh` needs `host`, `workdir`, optional `vm`; `local` takes optional `extra_targets`. A missing required key fails with "test-envs.toml: envs.<name>.<key> is required for kind <kind>". A missing `test-envs.toml` means one `local` environment named `local`. The "Windows VM not set up" message becomes "SSH host <host> not reachable; see docs/dev-setup.md#local-windows-vm".
+- [ ] **Step 5:** Add the recipe `test-local *envs` (empty = every enabled env in `test-envs.toml`; an unknown name fails listing the defined ones). It runs each env's kind runner in turn without stopping at the first failure, prints `PASS <env>` or `FAIL <env>`, and exits 1 if any failed. It is not part of `ci`, because CI runners have no podman or UTM.
 - [ ] **Step 6: Verify.** Run `just test-local`. Expected: `PASS linux`, `PASS windows`, `PASS macos`. Run `just test-local linux` twice; the second run should rebuild noticeably faster (incremental target volume). Break one test temporarily: all three report `FAIL` and the exit code is 1. Then revert.
-- [ ] **Step 7:** In `docs/dev-setup.md`, add a "Local test environments" section with Step 1's one-time setup (anchor `local-windows-vm`) and how to run one environment at a time. Add `just test-local` to the Commands list in `CLAUDE.md`.
+- [ ] **Step 7:** In `docs/dev-setup.md`, add a "Local test environments" section with Step 1's one-time setup (anchor `local-windows-vm`) and how to run one environment at a time. Add `just test-local` to the Commands list in `CLAUDE.md`. In the spec's section 10, add to the M2 row's Contents: "`devctl test` running the `just` contract in configurable environments (`[test.envs]` in `.devctl.toml`: container, SSH host, local), replacing this repo's `just test-local` scripts".
 - [ ] **Step 8:** Commit: `Add local test runs for Linux, Windows and macOS`.
 
 ---
