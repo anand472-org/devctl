@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::cli::HookName;
 use crate::commit_size;
 use crate::ctx::Ctx;
-use crate::gate::{self, GateReport};
+use crate::gate;
 use crate::git::Repo as _;
 use crate::record::{queue, worker};
 use crate::{Process, in_session};
@@ -22,7 +22,7 @@ pub fn run_hook(name: HookName, args: &[String]) -> Result<()> {
     match name {
         HookName::PrePush => {
             let process = Process::Hook(name.as_str().to_string());
-            let report = in_session(
+            let blocked = in_session(
                 &process,
                 || tracing::info_span!("hook", name = name.as_str()),
                 |ctx| {
@@ -31,13 +31,14 @@ pub fn run_hook(name: HookName, args: &[String]) -> Result<()> {
                     std::io::stdin()
                         .read_to_string(&mut stdin)
                         .context("cannot read the refs git passed on stdin")?;
-                    let report = pre_push(ctx, args, &stdin)?;
-                    print!("{}", report.text);
-                    Ok(report)
+                    pre_push(ctx, args, &stdin, &mut |text| {
+                        print!("{text}");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    })
                 },
             )
             .context("the pre-push gate could not run, so the push is blocked")?;
-            if report.blocked {
+            if blocked {
                 bail!("push blocked by devctl; fix what is listed above, then push again");
             }
             Ok(())
@@ -97,11 +98,21 @@ pub fn script(name: &str) -> String {
     }
 }
 
+/// What to add by hand to an existing hook `name` at `path`: the command
+/// line of [`script`] without `exec` (which would end the hook there), and
+/// for `pre-push` a reminder that git's ref list arrives on stdin.
 fn add_line(path: &std::path::Path, name: &str) -> String {
-    format!(
-        "add this line to {}: devctl hook {name} \"$@\"",
-        path.display()
-    )
+    let script = script(name);
+    let command = script
+        .lines()
+        .nth(1)
+        .and_then(|l| l.strip_prefix("exec "))
+        .unwrap_or_default();
+    let mut text = format!("add this line to {}: {command}", path.display());
+    if name == "pre-push" {
+        text.push_str("\n  (devctl must be the first command in the hook to read stdin)");
+    }
+    text
 }
 
 /// Writes the three hook scripts into `<common dir>/hooks`. Writes nothing
@@ -196,11 +207,19 @@ pub fn post_commit(ctx: &Ctx) -> Result<()> {
 }
 
 /// The `pre-push` gate: `args` are git's (`<remote name or URL> <URL>`),
-/// `stdin` its ref lines.
+/// `stdin` its ref lines. Each ref's report goes to `emit` as soon as it is
+/// ready, headed by `<remote ref>:` when several refs are pushed, so the
+/// refs before one that fails to evaluate are still shown. Returns whether
+/// any ref is blocked.
 ///
 /// # Errors
 /// On missing arguments, unparsable input or any failure evaluating a rule.
-pub fn pre_push(ctx: &Ctx, args: &[String], stdin: &str) -> Result<GateReport> {
+pub fn pre_push(
+    ctx: &Ctx,
+    args: &[String],
+    stdin: &str,
+    emit: &mut dyn FnMut(&str),
+) -> Result<bool> {
     let name = args.first().ok_or_else(|| {
         anyhow!(
             "pre-push was called without the remote name; git passes it, so run \
@@ -209,14 +228,16 @@ pub fn pre_push(ctx: &Ctx, args: &[String], stdin: &str) -> Result<GateReport> {
     })?;
     let remote = gate::Remote::from_hook_args(name, args.get(1).map(String::as_str));
     let updates = gate::parse_pre_push(stdin)?;
-    let mut text = String::new();
     let mut blocked = false;
     for update in &updates {
+        if updates.len() > 1 {
+            emit(&format!("{}:\n", update.remote_ref));
+        }
         let results = gate::evaluate(ctx, &remote, update)?;
         blocked |= gate::blocked(&results);
-        text.push_str(&gate::render(update, &results));
+        emit(&gate::render(update, &results));
     }
-    Ok(GateReport { text, blocked })
+    Ok(blocked)
 }
 
 #[cfg(test)]
@@ -299,6 +320,33 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(hooks_dir(&t).join("pre-push")).unwrap(),
             "#!/bin/sh\necho mine\n"
+        );
+    }
+
+    #[test]
+    fn hand_install_lines_match_the_scripts() {
+        let p = std::path::Path::new("h");
+        assert_eq!(
+            add_line(&p.join("post-commit"), "post-commit"),
+            format!(
+                "add this line to {}: devctl hook post-commit \"$@\" </dev/null >/dev/null 2>&1",
+                p.join("post-commit").display()
+            )
+        );
+        assert_eq!(
+            add_line(&p.join("pre-push"), "pre-push"),
+            format!(
+                "add this line to {}: devctl hook pre-push \"$@\"\n  (devctl must be the first \
+                 command in the hook to read stdin)",
+                p.join("pre-push").display()
+            )
+        );
+        assert_eq!(
+            add_line(&p.join("pre-commit"), "pre-commit"),
+            format!(
+                "add this line to {}: devctl hook pre-commit \"$@\"",
+                p.join("pre-commit").display()
+            )
         );
     }
 

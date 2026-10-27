@@ -27,6 +27,25 @@ pub struct FileChange {
 /// added there.
 pub type AddedLines = BTreeMap<String, BTreeSet<u32>>;
 
+/// Lowercase hex of an object ID's bytes.
+#[must_use]
+pub fn hex(id: &[u8]) -> String {
+    use std::fmt::Write as _;
+    id.iter()
+        .fold(String::with_capacity(id.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// The first seven hex digits of an object ID, as git abbreviates it.
+#[must_use]
+pub fn short_hex(id: &[u8]) -> String {
+    let mut s = hex(&id[..id.len().min(4)]);
+    s.truncate(7);
+    s
+}
+
 /// Everything devctl reads from git.
 pub trait Repo {
     /// The shared git directory (`git rev-parse --git-common-dir`), absolute.
@@ -586,6 +605,16 @@ mod tests {
     use super::*;
     use crate::ctx::slug;
     use crate::test_support::TestRepo;
+
+    #[test]
+    fn hex_and_short_hex() {
+        let id = [0x1a, 0x2b, 0x3c, 0x4d, 0x5e];
+        assert_eq!(hex(&id), "1a2b3c4d5e");
+        assert_eq!(short_hex(&id), "1a2b3c4");
+        assert_eq!(short_hex(&[0xab]), "ab");
+        let oid = ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
+        assert_eq!(short_hex(oid.as_bytes()), "0123456");
+    }
 
     fn oid(hex: &str) -> ObjectId {
         ObjectId::from_hex(hex.as_bytes()).unwrap()

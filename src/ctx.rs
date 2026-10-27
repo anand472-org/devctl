@@ -113,6 +113,16 @@ impl Ctx {
         })
     }
 
+    /// The error for a store that cannot be read: a local cache, so
+    /// deleting it is the fix.
+    #[must_use]
+    pub fn store_unreadable(&self) -> String {
+        format!(
+            "cannot read the record store {}; delete it and run `devctl record` again",
+            self.dirs.store().display()
+        )
+    }
+
     /// The record store at [`DevctlDirs::store`].
     #[must_use]
     pub fn store(&self) -> RedbStore {
