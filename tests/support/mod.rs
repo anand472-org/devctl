@@ -14,7 +14,7 @@ use std::process::Command;
 
 /// Variables that would make git operate on some other repository or index
 /// than the one the test names (they are set when tests run inside a hook).
-const REPO_ENV: [&str; 8] = [
+pub const REPO_ENV: [&str; 8] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
