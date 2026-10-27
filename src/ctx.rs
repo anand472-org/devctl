@@ -11,7 +11,9 @@ use crate::config::Config;
 use crate::git::{GixRepo, Repo};
 
 /// A branch name made safe for one path component: `/` becomes `-`
-/// (`feature/x` -> `feature-x`).
+/// (`feature/x` -> `feature-x`). `feature/x` and `feature-x` share a slug; that
+/// is accepted, since `feature-x` does not match the branch pattern and cannot
+/// pass the gate.
 #[must_use]
 pub fn slug(branch: &str) -> String {
     branch.replace('/', "-")

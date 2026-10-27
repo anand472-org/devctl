@@ -11,6 +11,11 @@ fn devctl() -> Command {
 }
 
 #[test]
+fn test_helper_strips_the_same_git_env_as_devctl() {
+    assert_eq!(support::REPO_ENV, devctl::git::REPO_ENV);
+}
+
+#[test]
 fn version_subcommand_prints_version() {
     devctl()
         .arg("version")

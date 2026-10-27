@@ -105,18 +105,40 @@ pub struct GixRepo {
 
 impl GixRepo {
     /// Finds the repository containing `cwd` (searching upwards). `GIT_DIR`
-    /// does not override `cwd`; `GIT_INDEX_FILE` (set by git for hooks during
-    /// `git commit -a`) is honoured for the index.
+    /// does not override `cwd`, but once the repository is found gix still
+    /// applies the repository-local overrides `GIT_WORK_TREE`, `GIT_INDEX_FILE`
+    /// (set by git for hooks during `git commit -a`) and `GIT_NAMESPACE`.
     ///
     /// # Errors
-    /// If there is no repository at or above `cwd`, or it cannot be opened.
+    /// If there is no repository at or above `cwd` ("not inside a git
+    /// repository"), or one was found but cannot be opened (ownership,
+    /// permissions, corrupt config), with the underlying error.
     pub fn discover(cwd: &Path) -> Result<GixRepo> {
+        use gix::discover::upwards::Error as Discover;
+
         let repo = gix::ThreadSafeRepository::discover(cwd).map_err(|e| {
-            anyhow!(
-                "{} is not inside a git repository ({e}); run devctl from a git checkout, \
-                 or create one with `git init`",
-                cwd.display()
-            )
+            match e.downcast_any_ref::<Discover>() {
+                Some(
+                    Discover::NoGitRepository { .. }
+                    | Discover::NoGitRepositoryWithinCeiling { .. }
+                    | Discover::NoGitRepositoryWithinFs { .. },
+                ) => anyhow!(
+                    "{} is not inside a git repository ({e}); run devctl from a git \
+                     checkout, or create one with `git init`",
+                    cwd.display()
+                ),
+                Some(Discover::NoTrustedGitRepository { candidate, .. }) => anyhow!(
+                    "the git repository at {} is owned by another user, so devctl will not \
+                     use it ({e}); run devctl as its owner, or mark it safe with \
+                     `git config --global --add safe.directory <path>`",
+                    candidate.display()
+                ),
+                _ => anyhow!(
+                    "cannot open the git repository containing {}: {e}; check that \
+                     `git status` works there and fix what it reports",
+                    cwd.display()
+                ),
+            }
         })?;
         let local = repo.to_thread_local();
         let base = local.current_dir().to_path_buf();
@@ -161,12 +183,15 @@ fn blob(repo: &gix::Repository, id: &gix::oid) -> Result<Vec<u8>> {
     Ok(obj.take_data())
 }
 
-/// Line diff of `old` -> `new` as git computes it (histogram, then git's
-/// slider heuristics). A line is a run of bytes ending in `\n` (CR stays part
-/// of the line), plus a final unterminated run.
+/// Line diff of `old` -> `new` as `git diff` computes it by default (Myers,
+/// then git's slider heuristics). Histogram is not used: imara's histogram
+/// disagrees with git's on repetitive input (untouched lines reported as new),
+/// while Myers plus line postprocessing matches `git diff` and `--numstat`. A
+/// line is a run of bytes ending in `\n` (CR stays part of the line), plus a
+/// final unterminated run.
 fn line_diff(old: &[u8], new: &[u8]) -> Diff {
     let input = InternedInput::new(old, new);
-    let mut diff = Diff::compute(Algorithm::Histogram, &input);
+    let mut diff = Diff::compute(Algorithm::Myers, &input);
     diff.postprocess_lines(&input);
     diff
 }
@@ -198,11 +223,15 @@ impl Repo for GixRepo {
     }
 
     fn resolve(&self, rev: &str) -> Result<ObjectId> {
-        let id = self
-            .local()
+        let repo = self.local();
+        let id = repo
             .rev_parse_single(rev)
             .with_context(|| format!("cannot resolve '{rev}' to a git object"))?
-            .detach();
+            .object()
+            .with_context(|| format!("cannot read the object '{rev}' names"))?
+            .peel_to_commit()
+            .with_context(|| format!("'{rev}' does not name a commit"))?
+            .id;
         Ok(id)
     }
 
@@ -480,7 +509,9 @@ pub fn repo_name_from_url(url: &str) -> Option<String> {
     } else {
         url
     };
-    path.split(['/', '\\'])
+    // The last segment after any `/`, `\`, `:` or `@`, so neither user info
+    // (`u:pw@host:repo.git`) nor a host can come through.
+    path.split(['/', '\\', ':', '@'])
         .rev()
         .map(|seg| seg.strip_suffix(".git").unwrap_or(seg))
         .find(|seg| !seg.is_empty())
@@ -499,8 +530,10 @@ fn is_local_path(url: &str) -> bool {
 }
 
 /// Variables that would make git act on another repository, worktree or index
-/// than the one in `dir`.
-const REPO_ENV: [&str; 7] = [
+/// than the one in `dir` (git sets some of them for hooks). Removed by [`git`];
+/// child processes that run git (recipes) should drop them too. Kept identical
+/// to the list in the test helpers.
+pub const REPO_ENV: [&str; 8] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
@@ -508,6 +541,7 @@ const REPO_ENV: [&str; 7] = [
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
 ];
 
 /// Runs `git <args>` in `dir` and returns its stdout. Never prints; stdin is
@@ -635,9 +669,19 @@ mod tests {
         );
     }
 
-    /// New-side line numbers from `git diff -U0 --histogram` hunk headers.
+    /// New-side line numbers from `git diff -U0` (default algorithm) hunk
+    /// headers.
     fn git_cli_added(t: &TestRepo, base: &str, tip: &str, path: &str) -> BTreeSet<u32> {
-        let out = t.git(&["diff", "-U0", "--histogram", base, tip, "--", path]);
+        let out = t.git(&[
+            "-c",
+            "diff.algorithm=myers",
+            "diff",
+            "-U0",
+            base,
+            tip,
+            "--",
+            path,
+        ]);
         let mut set = BTreeSet::new();
         for line in out.lines().filter(|l| l.starts_with("@@ ")) {
             let new = line.split(' ').nth(2).unwrap().trim_start_matches('+');
@@ -655,14 +699,92 @@ mod tests {
         let after = "fn a() {\n    1;\n}\n\nfn new() {\n    9;\n}\n\nfn b() {\n    2;\n}\n";
         t.write("s.rs", before);
         t.write("d.txt", "x\ny\nx\ny\nx\n");
+        let (braces_before, braces_after) = repetitive_braces();
+        t.write("braces.rs", &braces_before);
+        let (moved_before, moved_after) = moved_block();
+        t.write("moved.rs", &moved_before);
         let base = t.commit("base");
         t.write("s.rs", after);
         t.write("d.txt", "x\ny\nx\ny\nx\ny\nx\nz\n");
+        t.write("braces.rs", &braces_after);
+        t.write("moved.rs", &moved_after);
         let tip = t.commit("tip");
         let got = open(&t).added_lines(Some(oid(&base)), oid(&tip)).unwrap();
-        for path in ["s.rs", "d.txt"] {
-            assert_eq!(got[path], git_cli_added(&t, &base, &tip, path), "{path}");
+        for path in ["s.rs", "d.txt", "braces.rs", "moved.rs"] {
+            assert_eq!(
+                got.get(path).cloned().unwrap_or_default(),
+                git_cli_added(&t, &base, &tip, path),
+                "{path}"
+            );
         }
+    }
+
+    /// Many `}` and blank lines, edited in the middle.
+    fn repetitive_braces() -> (String, String) {
+        let block =
+            |name: &str| format!("fn {name}() {{\n    if x {{\n        y();\n    }}\n}}\n\n");
+        let before: String = (0..12).map(|i| block(&format!("f{i}"))).collect();
+        let mut after = String::new();
+        for i in 0..12 {
+            if i == 5 {
+                after.push_str("fn extra() {\n    {\n    }\n}\n\n}\n\n");
+                continue;
+            }
+            after.push_str(&block(&format!("f{i}")));
+            if i == 7 {
+                after.push_str("}\n\n\n}\n");
+            }
+        }
+        (before, after)
+    }
+
+    /// A block of lines moved further down the same file.
+    fn moved_block() -> (String, String) {
+        let lines: Vec<String> = (0..30).map(|i| format!("line {}\n", i % 7)).collect();
+        let before: String = lines.concat();
+        let mut after: Vec<String> = lines.clone();
+        let block: Vec<String> = after.drain(3..9).collect();
+        let at = after.len() - 4;
+        after.splice(at..at, block);
+        (before, after.concat())
+    }
+
+    #[test]
+    fn staged_counts_match_git_numstat_on_repetitive_edits() {
+        let t = TestRepo::new();
+        let (braces_before, braces_after) = repetitive_braces();
+        let (moved_before, moved_after) = moved_block();
+        t.write("braces.rs", &braces_before);
+        t.write("moved.rs", &moved_before);
+        t.commit("base");
+        t.write("braces.rs", &braces_after);
+        t.write("moved.rs", &moved_after);
+        t.git(&["add", "-A"]);
+        let numstat = t.git(&[
+            "-c",
+            "diff.algorithm=myers",
+            "diff",
+            "--cached",
+            "--numstat",
+        ]);
+        let mut want: Vec<FileChange> = numstat
+            .lines()
+            .map(|l| {
+                let mut f = l.split('\t');
+                let added = f.next().unwrap().parse().unwrap();
+                let removed = f.next().unwrap().parse().unwrap();
+                FileChange {
+                    path: f.next().unwrap().to_string(),
+                    added,
+                    removed,
+                    binary: false,
+                }
+            })
+            .collect();
+        want.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut got = open(&t).staged_changes().unwrap();
+        got.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(got, want);
     }
 
     #[test]
@@ -729,6 +851,24 @@ mod tests {
         assert_eq!(r.ref_target("refs/heads/nope").unwrap(), None);
         assert!(r.resolve("nope").is_err());
         assert_eq!(r.current_branch().unwrap().as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn resolve_peels_annotated_tags_to_their_commit() {
+        let t = TestRepo::new();
+        t.write("f", "1\n");
+        let c = t.commit("c");
+        t.git(&["tag", "-a", "v1", "-m", "release"]);
+        let tag_object = t.git(&["rev-parse", "v1"]);
+        assert_ne!(tag_object, c);
+        let r = open(&t);
+        assert_eq!(r.resolve("v1").unwrap(), oid(&c));
+        assert_eq!(r.resolve("refs/tags/v1").unwrap(), oid(&c));
+        let err = r.resolve("HEAD^{tree}").err().unwrap();
+        assert!(
+            format!("{err:#}").contains("does not name a commit"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -886,6 +1026,16 @@ mod tests {
     }
 
     #[test]
+    fn discover_reports_an_unopenable_repo_as_such() {
+        let t = TestRepo::new();
+        std::fs::write(t.path().join(".git").join("config"), "[core\nbroken").unwrap();
+        let err = GixRepo::discover(t.path()).err().unwrap();
+        let msg = format!("{err:#}");
+        assert!(!msg.contains("not inside a git repository"), "{msg}");
+        assert!(msg.contains("cannot open the git repository"), "{msg}");
+    }
+
+    #[test]
     fn config_string_and_remote_url_name() {
         let t = TestRepo::new();
         let r = open(&t);
@@ -913,6 +1063,8 @@ mod tests {
             ("file:///srv/git/proj.git", Some("proj")),
             ("/srv/git/proj/.git", Some("proj")),
             ("C:\\repos\\proj.git", Some("proj")),
+            ("u:pw@host:repo.git", Some("repo")),
+            ("u:pw@host:org/repo.git", Some("repo")),
             ("https://user@host", None),
             ("https://host/", None),
             ("", None),
