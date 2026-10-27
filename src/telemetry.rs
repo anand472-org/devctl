@@ -204,8 +204,10 @@ pub fn build_with(s: &Settings, exporters: Option<Exporters>) -> (tracing::Dispa
                 (include_paths || m.target() != PATH_TARGET) && !is_export_internal(m.target())
             })
         };
-        // `log_level` governs the log bridge only: spans and metric events export
-        // at info and above regardless, so counters survive `log_level = "warn"`.
+        // `log_level` governs the log bridge only. Spans export at info and above;
+        // metric events export at any level (the metrics layer reacts only to
+        // `monotonic_counter.`/`histogram.`/`counter.` fields), so counters such
+        // as the debug-level `store.busy_retries` survive any `log_level`.
         layers.push(
             OpenTelemetryLayer::new(e.tracer.tracer("devctl"))
                 .with_filter(export_filter().and(LevelFilter::INFO))
@@ -218,7 +220,7 @@ pub fn build_with(s: &Settings, exporters: Option<Exporters>) -> (tracing::Dispa
         );
         layers.push(
             MetricsLayer::new(e.meter.clone())
-                .with_filter(export_filter().and(LevelFilter::INFO))
+                .with_filter(export_filter())
                 .boxed(),
         );
     }
@@ -695,5 +697,25 @@ mod tests {
         );
         // Metrics were still flushed even though tracing hung.
         assert!(!mem_out.metrics.get_finished_metrics().unwrap().is_empty());
+    }
+
+    #[test]
+    fn debug_level_metric_events_are_exported() {
+        let c = cfg("", false);
+        let s = settings(&c, None);
+        let (m, e) = mem(&s);
+        let (dispatch, guard) = build_with(&s, Some(e));
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::debug!(monotonic_counter.devctl.store.busy_retries = 1_u64);
+        });
+        drop(guard);
+        let finished = m.metrics.get_finished_metrics().unwrap();
+        assert!(
+            finished
+                .iter()
+                .flat_map(opentelemetry_sdk::metrics::data::ResourceMetrics::scope_metrics)
+                .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
+                .any(|x| x.name() == "devctl.store.busy_retries")
+        );
     }
 }
