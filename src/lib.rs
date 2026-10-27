@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod commit_size;
 pub mod config;
 pub mod ctx;
 pub mod gate;
