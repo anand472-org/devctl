@@ -47,10 +47,11 @@ ssh "$host" "\$ErrorActionPreference='Stop'; if (Test-Path '$workdir') { Get-Chi
 # The tar goes over scp, not the remote shell's stdin (unreliable under Windows PowerShell
 # 5.1), and is extracted with Windows' own bsdtar by absolute path: GNU tar from Git's
 # usr\bin, also on PATH, would read `C:` as host:path.
-remote_tar='C:/devctl-work.tar'
-scp -q "$TREE_TAR" "$host:$remote_tar"
+# Staged in the SSH user's home (a relative scp path), not the drive root.
+scp -q "$TREE_TAR" "$host:devctl-work.tar"
+remote_tar='"$HOME\devctl-work.tar"'
 # Each native command: reset $LASTEXITCODE first, then fail on `$?` (command not found
 # leaves $LASTEXITCODE unchanged) or a non-zero exit code. No `&&`, so it runs in 5.1 and 7.
 chk='if (-not $? -or $LASTEXITCODE -ne 0) { exit 1 }'
-ssh "$host" "\$LASTEXITCODE = 0; & 'C:\\Windows\\System32\\tar.exe' -xf '$remote_tar' -C '$workdir'; $chk; Remove-Item -Force '$remote_tar'"
-ssh "$host" "Set-Location '$workdir'; if (-not \$?) { exit 1 }; \$LASTEXITCODE = 0; rustup toolchain install; $chk; \$LASTEXITCODE = 0; mise trust; $chk; \$LASTEXITCODE = 0; mise install; $chk; \$LASTEXITCODE = 0; just ci; \$c = \$LASTEXITCODE; if (-not \$? -or \$c -ne 0) { exit 1 }; exit 0"
+ssh "$host" "\$LASTEXITCODE = 0; & 'C:\\Windows\\System32\\tar.exe' -xf $remote_tar -C '$workdir'; $chk; Remove-Item -Force $remote_tar"
+ssh "$host" "Set-Location '$workdir'; if (-not \$?) { exit 1 }; \$LASTEXITCODE = 0; rustup toolchain install; $chk; \$LASTEXITCODE = 0; mise trust; $chk; \$LASTEXITCODE = 0; mise install; $chk; \$LASTEXITCODE = 0; just ci; $chk; exit 0"
