@@ -41,7 +41,7 @@ fn store_record(ctx: &Ctx, record: &Record, raw: Option<&RawReports>) -> Result<
     let id = store.put_record(record, raw).with_context(|| {
         format!(
             "cannot store the record for {} on {}",
-            hex_of(&record.commit),
+            crate::git::hex(&record.commit),
             record.branch
         )
     })?;
@@ -51,14 +51,6 @@ fn store_record(ctx: &Ctx, record: &Record, raw: Option<&RawReports>) -> Result<
         tracing::warn!(error = %e, "cannot apply record retention");
     }
     Ok(id)
-}
-
-fn hex_of(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
 }
 
 /// Copies the latest `ok`/`tests_failed` record of `tree` for `commit`.

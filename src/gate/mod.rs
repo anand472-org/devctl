@@ -17,9 +17,7 @@ use coverage::{compress_lines, new_code, passes};
 
 /// The first seven hex digits of `id`.
 fn short(id: ObjectId) -> String {
-    let mut hex = id.to_string();
-    hex.truncate(7);
-    hex
+    crate::git::short_hex(id.as_bytes())
 }
 
 /// One line of `pre-push` input. `None` stands for git's all-zero ID: a new
@@ -442,13 +440,6 @@ fn linear(
 /// `ok`/`tests_failed` one with its raw reports.
 type Usable = (Record, RawReports);
 
-fn store_error(ctx: &Ctx) -> String {
-    format!(
-        "cannot read the record store {}; delete it and run `devctl record` again",
-        ctx.dirs.store().display()
-    )
-}
-
 /// The newest record of `commit`, unless it is `ok`/`tests_failed` with its
 /// raw reports pruned (then it has to be recorded again).
 fn usable_record(ctx: &Ctx, commit: ObjectId) -> Result<Option<Usable>> {
@@ -458,7 +449,7 @@ fn usable_record(ctx: &Ctx, commit: ObjectId) -> Result<Option<Usable>> {
     let store = ctx.store();
     let Some((id, record)) = store
         .record_for(commit.as_bytes())
-        .with_context(|| store_error(ctx))?
+        .with_context(|| ctx.store_unreadable())?
     else {
         return Ok(None);
     };
@@ -467,7 +458,7 @@ fn usable_record(ctx: &Ctx, commit: ObjectId) -> Result<Option<Usable>> {
     }
     Ok(store
         .raw(id)
-        .with_context(|| store_error(ctx))?
+        .with_context(|| ctx.store_unreadable())?
         .map(|raw| (record, raw)))
 }
 

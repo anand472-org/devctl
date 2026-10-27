@@ -219,6 +219,38 @@ fn failed_test_blocks() {
 }
 
 #[test]
+fn several_refs_get_headers_and_earlier_results_survive_an_error() {
+    let f = Fixture::new();
+    let head = f.feature(&[]);
+    // The second ref pushes a commit this repository does not have to a
+    // protected branch, so walking its history fails.
+    let missing = "1111111111111111111111111111111111111111";
+    let stdin = format!(
+        "{}{}",
+        new_feature(&head),
+        line("refs/heads/dev", missing, "refs/heads/dev", ZERO)
+    );
+    let a = f.hook(&stdin).failure().stderr(contains(
+        "the pre-push gate could not run, so the push is blocked",
+    ));
+    let text = out(&a);
+    assert!(
+        text.starts_with("refs/heads/feature/x:\npass  branch-name: "),
+        "{text}"
+    );
+    assert!(text.contains("pass  new-code-coverage: "), "{text}");
+    assert!(text.contains("\nrefs/heads/dev:\n"), "{text}");
+}
+
+#[test]
+fn one_ref_has_no_header() {
+    let f = Fixture::new();
+    let head = f.feature(&[]);
+    let a = f.hook(&new_feature(&head)).success();
+    assert!(out(&a).starts_with("pass  branch-name: "), "{}", out(&a));
+}
+
+#[test]
 fn non_zero_exit_without_failed_test_blocks() {
     let f = Fixture::new();
     f.t.checkout_new("feature/x");

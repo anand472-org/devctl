@@ -6,7 +6,10 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use crate::{JustCommand, JustError, Lock, Platform, detect_just, normalize_windows};
+use crate::{
+    JustCommand, JustError, Lock, Platform, detect_just, detect_just_at, find_just_on_path,
+    normalize_windows,
+};
 
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -83,8 +86,20 @@ impl Platform for WindowsPlatform {
         }
     }
 
+    /// `just` from `PATH`; when only a `just.cmd`/`just.bat` shim is there
+    /// (which `Command::new("just")` does not find), that shim.
     fn just(&self) -> Result<JustCommand, JustError> {
-        detect_just()
+        match detect_just() {
+            Err(JustError::Missing) => {
+                let path = std::env::var_os("PATH").unwrap_or_default();
+                let pathext = std::env::var("PATHEXT").ok();
+                match find_just_on_path(&path, pathext.as_deref(), &Path::is_file) {
+                    Some(shim) => detect_just_at(shim),
+                    None => Err(JustError::Missing),
+                }
+            }
+            other => other,
+        }
     }
 
     fn data_dir(&self) -> Option<PathBuf> {

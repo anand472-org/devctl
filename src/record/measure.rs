@@ -112,33 +112,36 @@ fn checkout(ctx: &Ctx, path: &Path, hex: &str) -> Result<()> {
     .map(drop)
 }
 
+/// `git worktree add`. A registration whose directory is gone would make it
+/// refuse; `--force` overrides that for this path only (`git worktree
+/// prune` would also forget the developer's other, temporarily missing,
+/// worktrees).
 fn add(ctx: &Ctx, top: &Path, path: &Path, hex: &str) -> Result<()> {
     let target = utf8(path)?;
     let hooks = no_hooks(ctx)?;
-    let args = [
-        "-c",
-        "core.longpaths=true",
-        "-c",
-        &hooks,
-        "worktree",
-        "add",
-        "--detach",
-        target,
-        hex,
-    ];
-    if is_registered(ctx, top, path)? {
-        // Registered but its directory is gone: a stale entry that would
-        // make `worktree add` refuse.
-        tracing::info!(path = %path.display(), "pruning a stale measuring worktree registration");
-        git(top, &["worktree", "prune"])?;
-    }
-    match git(top, &args) {
-        Ok(_) => Ok(()),
-        Err(e) if format!("{e:#}").contains("already registered") => {
-            git(top, &["worktree", "prune"])?;
-            git(top, &args).map(drop)
+    let run = |force: bool| {
+        let mut args = vec![
+            "-c",
+            "core.longpaths=true",
+            "-c",
+            &hooks,
+            "worktree",
+            "add",
+            "--detach",
+        ];
+        if force {
+            args.push("--force");
         }
-        Err(e) => Err(e),
+        args.extend([target, hex]);
+        git(top, &args).map(drop)
+    };
+    let stale = is_registered(ctx, top, path)?;
+    if stale {
+        tracing::info!(path = %path.display(), "replacing a stale measuring worktree registration");
+    }
+    match run(stale) {
+        Err(e) if !stale && format!("{e:#}").contains("already registered") => run(true),
+        other => other,
     }
 }
 
@@ -191,7 +194,7 @@ pub fn prepare(ctx: &Ctx, branch: &str, commit: ObjectId) -> Result<PathBuf> {
     let failed = || {
         format!(
             "cannot check out {} in the measuring worktree {}; run `git worktree prune`, then `devctl record`",
-            &hex[..hex.len().min(7)],
+            crate::git::short_hex(commit.as_bytes()),
             path.display()
         )
     };
@@ -273,6 +276,36 @@ mod tests {
         // The registration is now stale; `worktree add` alone would refuse.
         let path = prepare(&ctx, "dev", oid(&a)).unwrap();
         assert_eq!(head_of(&t, &path), a);
+    }
+
+    #[test]
+    fn recovery_keeps_other_missing_worktrees_registered() {
+        let t = TestRepo::new();
+        let a = t.commit("a");
+        let ctx = Ctx::open(t.path(), Box::new(FakePlatform::new())).unwrap();
+        // The developer's own worktree, temporarily missing (e.g. on an
+        // unmounted drive): `git worktree prune` would forget it.
+        let other = tempfile::tempdir().unwrap();
+        let other_path = other.path().join("mine");
+        t.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            other_path.to_str().unwrap(),
+            &a,
+        ]);
+        let path = prepare(&ctx, "dev", oid(&a)).unwrap();
+        std::fs::remove_dir_all(&other_path).unwrap();
+        std::fs::remove_dir_all(&path).unwrap();
+        let path = prepare(&ctx, "dev", oid(&a)).unwrap();
+        assert_eq!(head_of(&t, &path), a);
+        let list = t.git(&["worktree", "list", "--porcelain"]);
+        assert!(
+            list.lines()
+                .any(|l| l.starts_with("worktree ") && l.ends_with("/mine")),
+            "{list}"
+        );
     }
 
     #[test]

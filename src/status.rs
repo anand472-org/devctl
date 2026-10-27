@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use devctl_store::{Record, Status, Store};
 
 use crate::ctx::Ctx;
-use crate::git::Repo;
+use crate::git::{Repo, short_hex};
 use crate::recipes::error_detail;
 use crate::record::{now_ms, previous_record, worker};
 
@@ -54,16 +54,6 @@ fn age(finished_at_ms: i64, now_ms: i64) -> String {
     }
 }
 
-/// The first seven hex digits of a commit ID.
-fn short(commit: &[u8]) -> String {
-    let mut hex = String::with_capacity(8);
-    for b in commit.iter().take(4) {
-        let _ = write!(hex, "{b:02x}");
-    }
-    hex.truncate(7);
-    hex
-}
-
 /// One summary line for `record`, e.g.
 /// `feature/x  1a2b3c4  ok  87.3% (+1.2)  tests 9 passed, 0 failed, 0 errored, 1 skipped  5m ago`.
 /// `previous` is the next-newest record on the branch. An `error` record adds
@@ -79,7 +69,7 @@ pub fn format_summary(record: &Record, previous: Option<&Record>, now_ms: i64) -
     let mut line = format!(
         "{}  {}  {status}  {}  tests {} passed, {} failed, {} errored, {} skipped  {}",
         record.branch,
-        short(&record.commit),
+        short_hex(&record.commit),
         coverage(record, previous),
         t.passed,
         t.failed,
@@ -142,12 +132,7 @@ pub fn run_status(ctx: &Ctx, branch: Option<&str>) -> Result<String> {
         return Ok(branch.map_or_else(|| NONE.to_string(), none_for));
     }
     let store = ctx.store();
-    let read_err = || {
-        format!(
-            "cannot read the record store {}; delete it and run `devctl record` again",
-            ctx.dirs.store().display()
-        )
-    };
+    let read_err = || ctx.store_unreadable();
     let branches = if let Some(b) = branch {
         vec![b.to_string()]
     } else {

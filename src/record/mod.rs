@@ -98,12 +98,7 @@ pub fn run_record(ctx: &Ctx, rev: Option<&str>) -> Result<RecordSummary> {
     let history = ctx
         .store()
         .records_on(&branch, ctx.config.retention.records_per_branch.max(2))
-        .with_context(|| {
-            format!(
-                "cannot read the record store {}; delete it and run `devctl record` again",
-                ctx.dirs.store().display()
-            )
-        })?;
+        .with_context(|| ctx.store_unreadable())?;
     let previous = previous_record(&history, id, &record);
     let mut text = format_summary(&record, previous, now_ms());
     if let Status::Error { stderr_tail } = &record.status {

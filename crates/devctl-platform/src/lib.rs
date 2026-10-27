@@ -1,5 +1,6 @@
 //! The only crate in the workspace allowed to contain OS-specific code.
 
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -178,7 +179,41 @@ pub fn parse_just_version(stdout: &str) -> Option<(u32, u32, u32)> {
 
 /// Runs `just --version` from `PATH`.
 pub(crate) fn detect_just() -> Result<JustCommand, JustError> {
-    let out = match Command::new("just").arg("--version").output() {
+    detect_just_at(PathBuf::from("just"))
+}
+
+/// Finds a `just` shim (`just.exe`, `just.cmd` or `just.bat`) in the
+/// directories of `path` (a `PATH` value), trying the extensions in the
+/// order `pathext` (a `PATHEXT` value, default `.COM;.EXE;.BAT;.CMD`) lists
+/// them. `is_file` says whether a candidate exists. Used on Windows, where
+/// `Command::new("just")` finds only `just.exe`; pure, so it is tested on
+/// every platform.
+#[must_use]
+pub fn find_just_on_path(
+    path: &OsStr,
+    pathext: Option<&str>,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    const SHIMS: [&str; 3] = [".exe", ".cmd", ".bat"];
+    let mut exts: Vec<String> = Vec::new();
+    for ext in pathext.unwrap_or(".COM;.EXE;.BAT;.CMD").split(';') {
+        let ext = ext.trim().to_ascii_lowercase();
+        if SHIMS.contains(&ext.as_str()) && !exts.contains(&ext) {
+            exts.push(ext);
+        }
+    }
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| {
+            exts.iter()
+                .map(|ext| dir.join(format!("just{ext}")))
+                .find(|candidate| is_file(candidate))
+        })
+}
+
+/// Runs `<program> --version` and checks it is at least [`MIN_JUST`].
+pub(crate) fn detect_just_at(program: PathBuf) -> Result<JustCommand, JustError> {
+    let out = match Command::new(&program).arg("--version").output() {
         Ok(o) => o,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(JustError::Missing),
         Err(e) => {
@@ -205,10 +240,7 @@ pub(crate) fn detect_just() -> Result<JustCommand, JustError> {
             found: format!("{a}.{b}.{c}"),
         });
     }
-    Ok(JustCommand {
-        program: PathBuf::from("just"),
-        version,
-    })
+    Ok(JustCommand { program, version })
 }
 
 /// The platform this binary was built for.
@@ -270,6 +302,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("a").join("b").join("x.lock");
         assert!(current().lock(&p).is_ok());
+    }
+
+    #[test]
+    fn finds_just_shims_in_path_and_pathext_order() {
+        let a = Path::new("a-dir");
+        let b = Path::new("b-dir");
+        let path = std::env::join_paths([a, Path::new(""), b]).unwrap();
+        let only = |files: Vec<PathBuf>| move |p: &Path| files.iter().any(|f| f == p);
+
+        // Earlier PATH directories win over extension order.
+        let files = only(vec![a.join("just.cmd"), b.join("just.exe")]);
+        assert_eq!(
+            find_just_on_path(&path, None, &files),
+            Some(a.join("just.cmd"))
+        );
+        // Within a directory, PATHEXT order: the default lists .BAT before .CMD.
+        let files = only(vec![b.join("just.cmd"), b.join("just.bat")]);
+        assert_eq!(
+            find_just_on_path(&path, None, &files),
+            Some(b.join("just.bat"))
+        );
+        assert_eq!(
+            find_just_on_path(&path, Some(".CMD;.BAT"), &files),
+            Some(b.join("just.cmd"))
+        );
+        // Extensions PATHEXT leaves out, and non-shim ones, are not tried.
+        assert_eq!(find_just_on_path(&path, Some(".EXE;.PS1"), &files), None);
+        let files = only(vec![a.join("just.com"), a.join("just")]);
+        assert_eq!(find_just_on_path(&path, None, &files), None);
     }
 
     #[test]
