@@ -77,8 +77,10 @@ Restart-Service sshd
 
 # --- Machine configuration --------------------------------------------------------
 
-# Machine Path: sh/bash for just, mise shims for non-interactive shells
+# Machine Path: sh/bash for just, coreutils (env, mkdir, cp, ...) for recipes and
+# their bash shebangs, mise shims for non-interactive shells
 Add-MachinePath 'C:\Program Files\Git\bin'
+Add-MachinePath 'C:\Program Files\Git\usr\bin'
 Add-MachinePath (Join-Path $env:LOCALAPPDATA 'mise\shims')
 
 New-Item -ItemType Directory -Path 'C:\devctl-work' -Force | Out-Null
