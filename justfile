@@ -36,9 +36,11 @@ check-pure:
 check-cfg:
     #!/usr/bin/env bash
     set -euo pipefail
-    if grep -rnE 'cfg!?\(.*(target_os|unix|windows)' --include='*.rs' \
-        --exclude-dir=devctl-platform --exclude-dir=target \
-        --exclude-dir=.superpowers --exclude-dir=.worktrees --exclude-dir=.git .; then
+    matches=$(grep -rnE 'cfg(_attr)?!?\(.*(target_os|target_family|unix|windows)' --include='*.rs' \
+        --exclude-dir=target --exclude-dir=.superpowers --exclude-dir=.worktrees --exclude-dir=.git . \
+        | grep -v '^\./crates/devctl-platform/' || true)
+    if [ -n "$matches" ]; then
+        echo "$matches"
         echo "error: platform cfg found outside crates/devctl-platform/ (listed above)" >&2
         exit 1
     fi
