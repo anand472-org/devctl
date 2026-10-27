@@ -44,6 +44,13 @@ fi
 
 make_tree_tar
 ssh "$host" "\$ErrorActionPreference='Stop'; if (Test-Path '$workdir') { Get-ChildItem -Force '$workdir' | Remove-Item -Recurse -Force } else { New-Item -ItemType Directory '$workdir' | Out-Null }"
-ssh "$host" "tar -xf - -C '$workdir'" < "$TREE_TAR"
-# Native commands only: no Stop preference (5.1 turns native stderr into errors); exit codes via if.
-ssh "$host" "Set-Location '$workdir'; if (-not \$?) { exit 1 }; rustup toolchain install; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }; mise trust; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }; mise install; if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }; just ci; exit \$LASTEXITCODE"
+# The tar goes over scp, not the remote shell's stdin (unreliable under Windows PowerShell
+# 5.1), and is extracted with Windows' own bsdtar by absolute path: GNU tar from Git's
+# usr\bin, also on PATH, would read `C:` as host:path.
+remote_tar='C:/devctl-work.tar'
+scp -q "$TREE_TAR" "$host:$remote_tar"
+# Each native command: reset $LASTEXITCODE first, then fail on `$?` (command not found
+# leaves $LASTEXITCODE unchanged) or a non-zero exit code. No `&&`, so it runs in 5.1 and 7.
+chk='if (-not $? -or $LASTEXITCODE -ne 0) { exit 1 }'
+ssh "$host" "\$LASTEXITCODE = 0; & 'C:\\Windows\\System32\\tar.exe' -xf '$remote_tar' -C '$workdir'; $chk; Remove-Item -Force '$remote_tar'"
+ssh "$host" "Set-Location '$workdir'; if (-not \$?) { exit 1 }; \$LASTEXITCODE = 0; rustup toolchain install; $chk; \$LASTEXITCODE = 0; mise trust; $chk; \$LASTEXITCODE = 0; mise install; $chk; \$LASTEXITCODE = 0; just ci; \$c = \$LASTEXITCODE; if (-not \$? -or \$c -ne 0) { exit 1 }; exit 0"
