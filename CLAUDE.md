@@ -21,6 +21,7 @@ just lint              # fmt --check + clippy -D warnings (clippy::pedantic is o
 just fmt
 just check-pure        # fail on non-pure-Rust dependencies
 just ci                # lint + test + check-pure, same as CI
+just test-local [env...]  # just ci in each env of test-envs.toml: podman container, UTM Windows VM, this Mac (default: all enabled)
 ```
 
 ## Architecture
