@@ -34,7 +34,8 @@ pub struct RecordCfg {
     pub timeout_minutes: u32,
 }
 
-/// How much history is kept.
+/// How much history is kept. A value of 0 for either field is accepted and
+/// means "keep none".
 #[derive(Debug, Clone)]
 pub struct Retention {
     pub records_per_branch: usize,
@@ -156,12 +157,35 @@ impl RawConfig {
             .branches
             .protected
             .unwrap_or_else(|| vec!["master".into(), "dev".into()]);
+        if protected.iter().any(String::is_empty) {
+            return Err(invalid(
+                "branches.protected",
+                "must not contain empty names",
+            ));
+        }
         let targets = self.branches.targets.unwrap_or_else(|| {
             DEFAULT_TARGETS
                 .iter()
                 .map(|&(k, v)| (k.to_owned(), v.to_owned()))
                 .collect()
         });
+        for (k, v) in &targets {
+            if k.is_empty() {
+                return Err(invalid("branches.targets", "keys must not be empty"));
+            }
+            if k.contains('/') {
+                return Err(invalid(
+                    &format!("branches.targets.{k}"),
+                    "must not contain '/'",
+                ));
+            }
+            if v.is_empty() {
+                return Err(invalid(
+                    &format!("branches.targets.{k}"),
+                    "target branch must not be empty",
+                ));
+            }
+        }
 
         let coverage = self.gate.new_code_coverage.unwrap_or(95);
         let new_code_coverage = u8::try_from(coverage)
@@ -214,32 +238,8 @@ impl RawConfig {
     }
 }
 
-/// The `[table]` name if `line` is a plain table header.
-fn header(line: &str) -> Option<String> {
-    let inner = line.trim().strip_prefix('[')?.strip_suffix(']')?;
-    (!inner.starts_with('[') && !inner.ends_with(']')).then(|| inner.trim().to_owned())
-}
-
-/// Best-effort dotted key for a toml error: the `key =` on the error's line,
-/// or a `[table]` header on that line, qualified by the nearest header above.
-fn key_at(text: &str, offset: usize) -> Option<String> {
-    let offset = offset.min(text.len());
-    let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
-    let line_end = text[offset..].find('\n').map_or(text.len(), |i| offset + i);
-    let line = text[line_start..line_end].trim();
-    if let Some(h) = header(line) {
-        return Some(h);
-    }
-    let (key, _) = line.split_once('=')?;
-    let key = key.trim();
-    if key.is_empty() {
-        return None;
-    }
-    let section = text[..line_start].lines().rev().find_map(header);
-    Some(section.map_or_else(|| key.to_owned(), |s| format!("{s}.{key}")))
-}
-
-fn describe(text: &str, e: &toml::de::Error) -> anyhow::Error {
+/// A TOML syntax error: no key exists yet, so report line and column.
+fn syntax_error(text: &str, e: &toml::de::Error) -> anyhow::Error {
     let msg = e.message().trim();
     let Some(span) = e.span() else {
         return anyhow!("invalid .devctl.toml: {msg}");
@@ -247,10 +247,18 @@ fn describe(text: &str, e: &toml::de::Error) -> anyhow::Error {
     let before = &text[..span.start.min(text.len())];
     let line = before.matches('\n').count() + 1;
     let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
-    let place = format!("line {line}, column {col}");
-    match key_at(text, span.start) {
-        Some(key) => anyhow!("invalid .devctl.toml: {key}: {msg} ({place})"),
-        None => anyhow!("invalid .devctl.toml: {place}: {msg}"),
+    anyhow!("invalid .devctl.toml: line {line}, column {col}: {msg}")
+}
+
+/// A schema error (unknown key, wrong type). The dotted path comes from the
+/// deserializer itself, so it is exact; at the top level there is no key.
+fn schema_error(e: &serde_path_to_error::Error<toml::de::Error>) -> anyhow::Error {
+    let msg = e.inner().message().trim();
+    let path = e.path().to_string();
+    if path == "." {
+        anyhow!("invalid .devctl.toml: {msg}")
+    } else {
+        invalid(&path, msg)
     }
 }
 
@@ -289,7 +297,9 @@ impl Config {
     /// unknown key, a wrong type, or a value out of range.
     pub fn parse(text: &str) -> Result<Config> {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let raw: RawConfig = toml::from_str(text).map_err(|e| describe(text, &e))?;
+        let table: toml::Table = text.parse().map_err(|e| syntax_error(text, &e))?;
+        let raw: RawConfig =
+            serde_path_to_error::deserialize(table).map_err(|e| schema_error(&e))?;
         raw.validate()
     }
 
@@ -394,7 +404,83 @@ mod tests {
             e.starts_with("invalid .devctl.toml: record.timeout_minutes: "),
             "{e}"
         );
-        assert!(e.contains("line 2"), "{e}");
+    }
+
+    fn err(s: &str) -> String {
+        Config::parse(s).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn commented_header_attributes_correct_key() {
+        let e = err("[gate]\nnew_code_coverage = 1\n[record] # c\ntimeout_minutes = \"x\"");
+        assert!(
+            e.starts_with("invalid .devctl.toml: record.timeout_minutes: "),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn multiline_array_with_equals_names_exact_key() {
+        let e = err("[branches]\nprotected = [\n  \"a=b\",\n  5,\n]");
+        assert!(
+            e.starts_with("invalid .devctl.toml: branches.protected[1]: "),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn inline_table_value_names_exact_key() {
+        let e = err("[branches]\ntargets = { feature = 5 }");
+        assert!(
+            e.starts_with("invalid .devctl.toml: branches.targets.feature: "),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn top_level_unknown_key_has_no_wrong_key() {
+        let e = err("bogus = 1");
+        assert!(e.starts_with("invalid .devctl.toml: "), "{e}");
+        assert!(e.contains("bogus"), "{e}");
+    }
+
+    #[test]
+    fn empty_names_rejected() {
+        assert!(
+            err("[branches]\nprotected = [\"\"]")
+                .starts_with("invalid .devctl.toml: branches.protected: ")
+        );
+        assert!(
+            err("[branches]\ntargets = { \"\" = \"dev\" }")
+                .starts_with("invalid .devctl.toml: branches.targets: ")
+        );
+        assert!(
+            err("[branches]\ntargets = { feature = \"\" }")
+                .starts_with("invalid .devctl.toml: branches.targets.feature: ")
+        );
+    }
+
+    #[test]
+    fn slash_in_target_key_rejected() {
+        assert_eq!(
+            err("[branches]\ntargets = { \"feature/x\" = \"dev\" }"),
+            "invalid .devctl.toml: branches.targets.feature/x: must not contain '/'"
+        );
+    }
+
+    #[test]
+    fn zero_retention_accepted() {
+        let c = Config::parse("[retention]\nrecords_per_branch = 0\nraw_reports_days = 0").unwrap();
+        assert_eq!(
+            (c.retention.records_per_branch, c.retention.raw_reports_days),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn regex_error_is_one_line() {
+        let e = err("[branches]\npattern = \"(\"");
+        assert!(!e.contains('\n'), "{e}");
     }
 
     #[test]
