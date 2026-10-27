@@ -4,9 +4,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Prefer using the LSP tool over text-grep for code navigation, finding references, and validating type structures.
 
-## Status
+## Commands
 
-The repository has no application code yet — only git/CI scaffolding. Add build, lint, and test commands and an architecture overview here once code exists.
+Rust toolchain is pinned in `rust-toolchain.toml`. On this machine `cargo` lives in `~/.cargo/bin`, which is not on the default shell PATH — prefix commands with `PATH="$HOME/.cargo/bin:$PATH"`.
+
+```sh
+cargo build
+cargo run -- <args>                          # e.g. cargo run -- version
+cargo test                                   # unit + integration tests
+cargo test <name>                            # single test by name filter
+cargo clippy --all-targets -- -D warnings    # lint (clippy::pedantic is on)
+cargo fmt --check
+```
+
+## Architecture
+
+`devctl` is a clap-derive CLI:
+
+- `src/cli.rs` — the `Cli` parser and `Command` subcommand enum. Add a subcommand by adding a variant here.
+- `src/lib.rs` — `run(&Cli)` dispatches each `Command` variant to its handler; errors propagate as `anyhow::Result`.
+- `src/main.rs` — thin entry point: parses args, calls `run`, prints `error: …` and exits non-zero on failure.
+- `tests/cli.rs` — integration tests that run the built binary through `assert_cmd`.
+
+## Purity constraints
+
+The crate is kept "max-pure":
+
+- `unsafe_code` is `forbid` in `[lints.rust]`.
+- Dependencies must be pure Rust: no `-sys` crates, `cc`/`cmake`/`bindgen` build steps, or system libraries (for example, use `rustls`, not OpenSSL). Check with `cargo tree -e normal,build,dev --prefix none | grep -E -- '-sys |^cc |^cmake|^bindgen'`, which should print nothing.
 
 ## Branching (git-flow)
 
