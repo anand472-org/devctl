@@ -11,6 +11,10 @@ pub struct Cli {
 pub enum Command {
     /// Print the devctl version
     Version,
+    /// Open the repository context and telemetry, record one event, and exit.
+    /// Internal: lets tests exercise the repository-bound command path.
+    #[command(hide = true)]
+    Probe,
 }
 
 #[cfg(test)]

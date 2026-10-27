@@ -1,5 +1,9 @@
-//! `devctl version` exports a trace to a plain-HTTP OTLP collector when
-//! `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and is unaffected by a dead collector.
+//! A repository-bound command exports a trace to a plain-HTTP OTLP collector
+//! when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and is unaffected by a dead
+//! collector. Uses the hidden `probe` command: `version` runs without
+//! telemetry.
+
+mod support;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -8,9 +12,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use support::TestRepo;
 
-fn devctl() -> Command {
-    Command::cargo_bin("devctl").expect("devctl binary should build")
+/// `devctl probe` inside a fresh repository with one commit. The repository is
+/// returned so it outlives the command.
+fn probe() -> (Command, TestRepo) {
+    let t = TestRepo::new();
+    t.write("f", "1\n");
+    t.commit("one");
+    let mut cmd = Command::cargo_bin("devctl").expect("devctl binary should build");
+    cmd.current_dir(t.path()).env_remove("GIT_DIR").arg("probe");
+    (cmd, t)
 }
 
 /// Reads one request's headers and body; returns the request path.
@@ -71,16 +83,15 @@ fn version_exports_a_trace_to_the_collector() {
         }
     });
 
-    devctl()
-        .arg("version")
-        .env(
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{port}"),
-        )
-        .env_remove("OTEL_SDK_DISABLED")
-        .timeout(Duration::from_secs(10))
-        .assert()
-        .success();
+    let (mut cmd, _repo) = probe();
+    cmd.env(
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        format!("http://127.0.0.1:{port}"),
+    )
+    .env_remove("OTEL_SDK_DISABLED")
+    .timeout(Duration::from_secs(10))
+    .assert()
+    .success();
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut seen = Vec::new();
@@ -108,17 +119,16 @@ fn dead_collector_does_not_fail_or_slow_the_command() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
+    let (mut cmd, _repo) = probe();
     let start = Instant::now();
-    devctl()
-        .arg("version")
-        .env(
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{port}"),
-        )
-        .env_remove("OTEL_SDK_DISABLED")
-        .timeout(Duration::from_secs(10))
-        .assert()
-        .success();
+    cmd.env(
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        format!("http://127.0.0.1:{port}"),
+    )
+    .env_remove("OTEL_SDK_DISABLED")
+    .timeout(Duration::from_secs(10))
+    .assert()
+    .success();
     assert!(
         start.elapsed() < Duration::from_secs(3),
         "took {:?}",
