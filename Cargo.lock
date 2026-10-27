@@ -403,6 +403,7 @@ dependencies = [
 name = "devctl-store"
 version = "0.1.0"
 dependencies = [
+ "fastrand",
  "postcard",
  "redb",
  "ruzstd",

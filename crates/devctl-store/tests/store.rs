@@ -265,8 +265,64 @@ fn garbage_file_is_corrupt() {
 fn missing_parent_dir_is_io_not_corrupt() {
     let dir = tempfile::tempdir().unwrap();
     let path: PathBuf = dir.path().join("nope").join("store.redb");
-    let s = RedbStore::new(path);
-    assert!(matches!(s.branches(), Err(StoreError::Io { .. })));
+    let s = RedbStore::new(path.clone());
+    assert!(matches!(
+        s.put_record(&rec(1, 1, "dev", 1, Status::Ok), None),
+        Err(StoreError::Io { .. })
+    ));
+    // Reads of a missing store are empty and do not create it.
+    assert_eq!(s.branches().unwrap(), Vec::<String>::new());
+    assert_eq!(s.record_for(&[1; 20]).unwrap(), None);
+    assert!(!path.exists());
+}
+
+#[test]
+fn reads_of_missing_store_do_not_create_it() {
+    let (d, s) = store();
+    assert_eq!(s.records_on("dev", 5).unwrap(), vec![]);
+    assert_eq!(s.latest_ok("dev").unwrap(), None);
+    assert_eq!(s.raw(1).unwrap(), None);
+    assert!(!d.path().join("store.redb").exists());
+}
+
+#[test]
+fn readers_share_the_store() {
+    let (d, s) = store();
+    let id = s
+        .put_record(&rec(1, 1, "dev", 1, Status::Ok), None)
+        .unwrap();
+    let held = redb::ReadOnlyDatabase::open(d.path().join("store.redb")).unwrap();
+    let s2 =
+        RedbStore::new(d.path().join("store.redb")).with_busy_budget(Duration::from_millis(200));
+    assert_eq!(s2.record_for(&[1; 20]).unwrap().unwrap().0, id);
+    drop(held);
+}
+
+#[test]
+fn ids_never_reused_after_prune() {
+    let (_d, s) = store();
+    let _a = s
+        .put_record(&rec(1, 1, "dev", 1000, Status::Ok), None)
+        .unwrap();
+    // Newest id, but older finished_at: prune(1) removes it.
+    let b = s
+        .put_record(&rec(2, 2, "dev", 500, Status::Ok), None)
+        .unwrap();
+    let stats = s
+        .prune(
+            &RetentionPolicy {
+                records_per_branch: 1,
+                raw_reports_days: 90,
+            },
+            2000,
+        )
+        .unwrap();
+    assert_eq!(stats.records_removed, 1);
+    assert_eq!(s.record_for(&[2; 20]).unwrap(), None);
+    let c = s
+        .put_record(&rec(3, 3, "dev", 3000, Status::Ok), None)
+        .unwrap();
+    assert!(c > b, "{c} <= {b}");
 }
 
 #[test]
@@ -277,7 +333,8 @@ fn concurrent_processes_all_succeed() {
         .map(|t| {
             let path = path.clone();
             std::thread::spawn(move || {
-                let s = RedbStore::new(path);
+                // Not latency-sensitive: only checks that no write is lost.
+                let s = RedbStore::new(path).with_busy_budget(Duration::from_secs(60));
                 for i in 0..20u8 {
                     let mut r = rec(t, t, "dev", i64::from(t) * 100 + i64::from(i), Status::Ok);
                     r.commit = vec![t, i];
@@ -291,6 +348,57 @@ fn concurrent_processes_all_succeed() {
     }
     let s = RedbStore::new(path);
     assert_eq!(s.records_on("dev", 1000).unwrap().len(), 160);
+}
+
+#[test]
+fn realistic_mix_with_default_budget_has_no_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.redb");
+    let raw = RawReports {
+        lcov: "TN:\n".repeat(100),
+        junit: vec![],
+    };
+    let seed = RedbStore::new(path.clone());
+    let mut r0 = rec(0, 0, "dev", 1, Status::Ok);
+    r0.commit = vec![0, 0];
+    seed.put_record(&r0, Some(&raw)).unwrap();
+
+    let writer = {
+        let path = path.clone();
+        let raw = raw.clone();
+        std::thread::spawn(move || {
+            let s = RedbStore::new(path);
+            for i in 1..=10u8 {
+                let mut r = rec(i, i, "dev", i64::from(i), Status::Ok);
+                r.commit = vec![i, i];
+                s.put_record(&r, Some(&raw)).unwrap();
+                s.prune(
+                    &RetentionPolicy {
+                        records_per_branch: 200,
+                        raw_reports_days: 90,
+                    },
+                    1_000,
+                )
+                .unwrap();
+            }
+        })
+    };
+    let readers: Vec<_> = (0..2)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let s = RedbStore::new(path);
+                for _ in 0..10 {
+                    let (id, _) = s.record_for(&[0, 0]).unwrap().unwrap();
+                    assert!(s.raw(id).unwrap().is_some());
+                }
+            })
+        })
+        .collect();
+    writer.join().unwrap();
+    for h in readers {
+        h.join().unwrap();
+    }
 }
 
 #[test]

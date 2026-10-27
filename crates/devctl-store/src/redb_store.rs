@@ -1,8 +1,8 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use redb::{Database, DatabaseError, ReadableDatabase, ReadableTable};
+use redb::{Database, DatabaseError, ReadOnlyDatabase, ReadableDatabase, ReadableTable};
 
 use crate::record::{PruneStats, RawReports, Record, RecordId, RetentionPolicy, Status};
 use crate::schema::{
@@ -12,10 +12,12 @@ use crate::schema::{
 const DEFAULT_BUSY_BUDGET: Duration = Duration::from_secs(5);
 const FIRST_BACKOFF: Duration = Duration::from_millis(2);
 const MAX_BACKOFF: Duration = Duration::from_millis(8);
-/// Pause after closing the file so a waiting process polling at the backoff
-/// rate gets a turn before this one (e.g. a worker writing in a loop) can
-/// take the lock again; without it the releasing handle starves the others.
+/// Pause after a write closes the file so a waiter polling at the backoff
+/// rate gets a turn before a writer looping on the store (e.g. a worker) can
+/// take the exclusive lock again; without it the releasing handle starves the
+/// others. Readers share the lock and need no pause.
 const RELEASE_PAUSE: Duration = Duration::from_millis(3);
+const NEXT_ID_KEY: &str = "next_id";
 const DAY_MS: i64 = 86_400_000;
 
 #[derive(Debug, thiserror::Error)]
@@ -122,49 +124,92 @@ impl RedbStore {
         }
     }
 
-    /// Open the database, retrying with exponential backoff while another
-    /// handle holds it. Only `DatabaseError::DatabaseAlreadyOpen` (redb's
-    /// failed exclusive file lock) counts as busy.
+    /// Sleep for one polling step of the busy loop, or fail with `Busy` once
+    /// the budget is spent. Polling is short and jittered (2-8 ms, bounded by
+    /// the busy budget): a long exponential backoff lets a handle that just
+    /// released the lock win it again before escalated waiters wake, which
+    /// starves them.
+    fn wait_busy(&self, start: Instant, delay: &mut Duration) -> Result<(), StoreError> {
+        let remaining = self.busy_budget.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return Err(StoreError::Busy {
+                path: self.path.clone(),
+            });
+        }
+        tracing::debug!(monotonic_counter.devctl.store.busy_retries = 1_u64);
+        let half = u64::try_from(delay.as_nanos() / 2).unwrap_or(1).max(1);
+        let jitter = Duration::from_nanos(fastrand::u64(0..half));
+        std::thread::sleep((*delay + jitter).min(remaining));
+        *delay = (*delay * 2).min(MAX_BACKOFF);
+        Ok(())
+    }
+
+    /// Open the database for writing, polling while another handle holds it.
+    /// Only `DatabaseError::DatabaseAlreadyOpen` (redb's failed file lock)
+    /// counts as busy.
     fn open(&self) -> Result<Database, StoreError> {
         let start = Instant::now();
         let mut delay = FIRST_BACKOFF;
         loop {
             match Database::create(&self.path) {
                 Ok(db) => return Ok(db),
-                Err(DatabaseError::DatabaseAlreadyOpen) => {
-                    let remaining = self.busy_budget.saturating_sub(start.elapsed());
-                    if remaining.is_zero() {
-                        return Err(StoreError::Busy {
-                            path: self.path.clone(),
-                        });
-                    }
-                    tracing::debug!(monotonic_counter.devctl.store.busy_retries = 1_u64);
-                    std::thread::sleep((delay + jitter(delay)).min(remaining));
-                    delay = (delay * 2).min(MAX_BACKOFF);
+                Err(DatabaseError::DatabaseAlreadyOpen) => self.wait_busy(start, &mut delay)?,
+                Err(e) => return Err(self.convert(e)),
+            }
+        }
+    }
+
+    /// Run `f` in a read transaction. Opens read-only (shared file lock, so
+    /// readers do not block each other and never create the file). A missing
+    /// or empty file yields `empty`. If redb says the file needs repair
+    /// (unclean shutdown) the read falls back to a writable open, which
+    /// repairs it.
+    fn read<T>(
+        &self,
+        op: &'static str,
+        empty: T,
+        f: impl FnOnce(&redb::ReadTransaction) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let _span = tracing::info_span!("store.txn", op).entered();
+        let start = Instant::now();
+        let mut delay = FIRST_BACKOFF;
+        loop {
+            match std::fs::metadata(&self.path) {
+                Ok(m) if m.len() == 0 => return Ok(empty),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(empty),
+                Err(source) => {
+                    return Err(StoreError::Io {
+                        path: self.path.clone(),
+                        source,
+                    });
+                }
+            }
+            match ReadOnlyDatabase::open(&self.path) {
+                Ok(db) => return self.read_tx(&db, f),
+                Err(DatabaseError::DatabaseAlreadyOpen) => self.wait_busy(start, &mut delay)?,
+                Err(DatabaseError::RepairAborted) => {
+                    let db = self.open()?;
+                    let out = self.read_tx(&db, f);
+                    drop(db);
+                    return out;
                 }
                 Err(e) => return Err(self.convert(e)),
             }
         }
     }
 
-    fn read<T>(
+    fn read_tx<T>(
         &self,
-        op: &'static str,
+        db: &impl ReadableDatabase,
         f: impl FnOnce(&redb::ReadTransaction) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        let _span = tracing::info_span!("store.txn", op).entered();
-        let db = self.open()?;
-        let out = (|| {
-            let tx = db.begin_read().map_err(|e| self.convert(e))?;
-            match schema::check_read(&tx).map_err(|e| self.convert(e))? {
-                SchemaCheck::Current => {}
-                SchemaCheck::Newer(found) => return Err(self.newer(found)),
-            }
-            f(&tx)
-        })();
-        drop(db);
-        std::thread::sleep(RELEASE_PAUSE);
-        out
+        let tx = db.begin_read().map_err(|e| self.convert(e))?;
+        match schema::check_read(&tx).map_err(|e| self.convert(e))? {
+            SchemaCheck::Current => {}
+            SchemaCheck::Newer(found) => return Err(self.newer(found)),
+        }
+        f(&tx)
     }
 
     fn write<T>(
@@ -187,6 +232,20 @@ impl RedbStore {
         drop(db);
         std::thread::sleep(RELEASE_PAUSE);
         out
+    }
+
+    fn id_overflow(&self) -> StoreError {
+        StoreError::Io {
+            path: self.path.clone(),
+            source: std::io::Error::other("record id counter exhausted"),
+        }
+    }
+
+    fn encode_error(&self, e: &postcard::Error) -> StoreError {
+        StoreError::Io {
+            path: self.path.clone(),
+            source: std::io::Error::other(format!("cannot encode value: {e}")),
+        }
     }
 
     fn newer(&self, found: u32) -> StoreError {
@@ -229,7 +288,7 @@ impl RedbStore {
         table: redb::TableDefinition<'static, &'static [u8], u64>,
         key: &[u8],
     ) -> Result<Option<(RecordId, Record)>, StoreError> {
-        self.read("lookup", |tx| {
+        self.read("lookup", None, |tx| {
             let index = match tx.open_table(table) {
                 Ok(t) => t,
                 Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
@@ -270,14 +329,6 @@ impl RedbStore {
         }
         Ok(Some(ids))
     }
-}
-
-fn jitter(delay: Duration) -> Duration {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::from(d.subsec_nanos()));
-    let half = u64::try_from(delay.as_nanos() / 2).unwrap_or(0).max(1);
-    Duration::from_nanos(nanos % half)
 }
 
 fn convert_error(path: &Path, e: redb::Error) -> StoreError {
@@ -324,12 +375,10 @@ impl Store for RedbStore {
         raw: Option<&RawReports>,
     ) -> Result<RecordId, StoreError> {
         // Encode before touching the file so the exclusive lock is held briefly.
-        let bytes = postcard::to_stdvec(record)
-            .map_err(|e| self.corrupt(format!("cannot encode record: {e}")))?;
+        let bytes = postcard::to_stdvec(record).map_err(|e| self.encode_error(&e))?;
         let raw_bytes = match raw {
             Some(r) => {
-                let plain = postcard::to_stdvec(r)
-                    .map_err(|e| self.corrupt(format!("cannot encode raw reports: {e}")))?;
+                let plain = postcard::to_stdvec(r).map_err(|e| self.encode_error(&e))?;
                 Some(ruzstd::encoding::compress_to_vec(
                     plain.as_slice(),
                     ruzstd::encoding::CompressionLevel::Fastest,
@@ -339,10 +388,27 @@ impl Store for RedbStore {
         };
         self.write("put_record", |tx| {
             let mut records = tx.open_table(RECORDS).map_err(|e| self.convert(e))?;
-            let id = records
-                .last()
+            // IDs only ever increase, even after prune removes the newest
+            // record: `meta.next_id` is the counter (seeded from the highest
+            // existing ID for stores that predate it).
+            let mut meta = tx.open_table(schema::META).map_err(|e| self.convert(e))?;
+            let stored = meta
+                .get(NEXT_ID_KEY)
                 .map_err(|e| self.convert(e))?
-                .map_or(1, |(k, _)| k.value() + 1);
+                .map(|v| v.value());
+            // `meta` values are u32 (spec 7.2), so the counter is a u32.
+            let id = match stored {
+                Some(n) => n,
+                None => records
+                    .last()
+                    .map_err(|e| self.convert(e))?
+                    .map_or(Ok(1), |(k, _)| u32::try_from(k.value() + 1))
+                    .map_err(|_| self.id_overflow())?,
+            };
+            let next = id.checked_add(1).ok_or_else(|| self.id_overflow())?;
+            meta.insert(NEXT_ID_KEY, next)
+                .map_err(|e| self.convert(e))?;
+            let id = RecordId::from(id);
             records
                 .insert(id, bytes.as_slice())
                 .map_err(|e| self.convert(e))?;
@@ -366,7 +432,10 @@ impl Store for RedbStore {
                 .map_err(|e| self.convert(e))?
                 .is_some()
             {
-                ts = ts.saturating_add(1);
+                ts = ts.checked_add(1).ok_or_else(|| StoreError::Io {
+                    path: self.path.clone(),
+                    source: std::io::Error::other("finished_at_ms overflow in by_branch index"),
+                })?;
             }
             by_branch
                 .insert((record.branch.as_str(), ts), id)
@@ -395,7 +464,7 @@ impl Store for RedbStore {
         branch: &str,
         limit: usize,
     ) -> Result<Vec<(RecordId, Record)>, StoreError> {
-        self.read("records_on", |tx| {
+        self.read("records_on", Vec::new(), |tx| {
             let Some(ids) = self.branch_ids_newest_first(tx, branch)? else {
                 return Ok(Vec::new());
             };
@@ -411,7 +480,7 @@ impl Store for RedbStore {
     }
 
     fn latest_ok(&self, branch: &str) -> Result<Option<(RecordId, Record)>, StoreError> {
-        self.read("latest_ok", |tx| {
+        self.read("latest_ok", None, |tx| {
             let Some(ids) = self.branch_ids_newest_first(tx, branch)? else {
                 return Ok(None);
             };
@@ -428,7 +497,7 @@ impl Store for RedbStore {
     }
 
     fn branches(&self) -> Result<Vec<String>, StoreError> {
-        self.read("branches", |tx| {
+        self.read("branches", Vec::new(), |tx| {
             let table = match tx.open_table(BY_BRANCH) {
                 Ok(t) => t,
                 Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -447,7 +516,7 @@ impl Store for RedbStore {
     }
 
     fn raw(&self, id: RecordId) -> Result<Option<RawReports>, StoreError> {
-        self.read("raw", |tx| {
+        self.read("raw", None, |tx| {
             let table = match tx.open_table(RAW) {
                 Ok(t) => t,
                 Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
@@ -480,9 +549,19 @@ impl Store for RedbStore {
                 }
             }
 
+            // Raw reports older than the cutoff go; the summaries stay. The
+            // index key's ts is >= the record's finished_at_ms (collision
+            // bumps only add), so `ts < cutoff` implies the record is stale
+            // and no record has to be decoded for the check.
+            let cutoff = now_ms.saturating_sub(i64::from(policy.raw_reports_days) * DAY_MS);
             for (branch, entries) in per_branch {
                 let excess = entries.len().saturating_sub(policy.records_per_branch);
-                for (ts, id) in entries.into_iter().take(excess) {
+                for &(ts, id) in &entries[excess..] {
+                    if ts < cutoff && raw.remove(id).map_err(|e| self.convert(e))?.is_some() {
+                        stats.raw_removed += 1;
+                    }
+                }
+                for &(ts, id) in &entries[..excess] {
                     let record = match records.remove(id).map_err(|e| self.convert(e))? {
                         Some(v) => Some(self.decode_record(v.value())?),
                         None => None,
@@ -517,21 +596,6 @@ impl Store for RedbStore {
                 }
             }
 
-            // Raw reports older than the cutoff go; the summaries stay.
-            let cutoff = now_ms.saturating_sub(i64::from(policy.raw_reports_days) * DAY_MS);
-            let mut stale = Vec::new();
-            for entry in records.iter().map_err(|e| self.convert(e))? {
-                let (k, v) = entry.map_err(|e| self.convert(e))?;
-                let id = k.value();
-                if self.decode_record(v.value())?.finished_at_ms < cutoff {
-                    stale.push(id);
-                }
-            }
-            for id in stale {
-                if raw.remove(id).map_err(|e| self.convert(e))?.is_some() {
-                    stats.raw_removed += 1;
-                }
-            }
             Ok(stats)
         })
     }

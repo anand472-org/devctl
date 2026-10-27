@@ -1,9 +1,12 @@
 //! Per-repo record store (`.git/devctl/store.redb`).
 //!
 //! Every operation opens the database, runs one transaction and closes it
-//! again, retrying with exponential backoff while another handle holds the
-//! file (redb allows one open handle at a time, across processes and across
-//! handles in one process).
+//! again. Writers hold redb's exclusive file lock; readers open read-only
+//! under a shared lock (and never create the file). While another handle
+//! holds a conflicting lock (across processes or handles in one process) the
+//! open is retried with short jittered polling (2-8 ms) bounded by the busy
+//! budget; long backoffs would let a handle that just released the lock win
+//! it again and starve the waiters.
 
 mod record;
 mod redb_store;
