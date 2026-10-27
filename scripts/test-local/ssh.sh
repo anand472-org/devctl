@@ -41,6 +41,7 @@ if ! probe; then
     done
 fi
 
-ssh "$host" "Remove-Item -Recurse -Force '$workdir/*' -ErrorAction SilentlyContinue"
-tree_tar | ssh "$host" "tar -xf - -C $workdir"
-ssh "$host" "Set-Location '$workdir'; rustup toolchain install; if (\$LASTEXITCODE) { exit \$LASTEXITCODE }; mise trust; mise install; if (\$LASTEXITCODE) { exit \$LASTEXITCODE }; just ci; exit \$LASTEXITCODE"
+make_tree_tar
+ssh "$host" "\$ErrorActionPreference='Stop'; if (Test-Path '$workdir') { Get-ChildItem -Force '$workdir' | Remove-Item -Recurse -Force } else { New-Item -ItemType Directory '$workdir' | Out-Null }"
+ssh "$host" "tar -xf - -C '$workdir'" < "$TREE_TAR"
+ssh "$host" "\$ErrorActionPreference='Stop'; Set-Location '$workdir'; rustup toolchain install; if (\$LASTEXITCODE) { exit \$LASTEXITCODE }; mise trust; if (\$LASTEXITCODE) { exit \$LASTEXITCODE }; mise install; if (\$LASTEXITCODE) { exit \$LASTEXITCODE }; just ci; exit \$LASTEXITCODE"

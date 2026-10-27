@@ -24,12 +24,14 @@ if ! podman machine list | grep -q 'Currently running'; then
     podman machine start
 fi
 
-podman build -t "$image" -f "$containerfile" "$(dirname "$containerfile")"
+podman build --platform "$platform" -t "$image" -f "$containerfile" "$(dirname "$containerfile")"
 
-tree_tar | podman run --rm -i --platform "$platform" \
+make_tree_tar
+podman run --rm -i --platform "$platform" \
     -v "$vol-rustup:/home/dev/.rustup" \
     -v "$vol-cargo:/home/dev/.cargo" \
     -v "$vol-mise:/home/dev/.local/share/mise" \
     -v "$vol-target:/home/dev/target" \
     "$image" \
-    sh -euc "rm -rf /home/dev/work/* && tar -xf - -C /home/dev/work && cd /home/dev/work && $TEST_CMD"
+    sh -euc "find /home/dev/work -mindepth 1 -delete && tar -xf - -C /home/dev/work && cd /home/dev/work && $TEST_CMD" \
+    < "$TREE_TAR"
