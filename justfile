@@ -33,3 +33,35 @@ check-pure:
 
 # Everything CI runs.
 ci: lint test check-pure
+
+# Run `just ci` in each environment of test-envs.toml (default: every enabled one):
+# podman container, SSH host (the UTM Windows VM), or this machine. Not part of `ci`:
+# CI runners have no podman or UTM.
+test-local *envs:
+    #!/bin/sh
+    set -u
+    . scripts/test-local/config.sh
+    all=$(env_all_names) || exit 1
+    envs="{{envs}}"
+    [ -n "$envs" ] || envs=$(env_names) || exit 1
+    for e in $envs; do
+        if ! printf '%s\n' "$all" | grep -qx -- "$e"; then
+            echo "error: unknown environment '$e'; defined: $(echo $all)" >&2
+            exit 1
+        fi
+    done
+    failed=0
+    for e in $envs; do
+        kind=$(env_get "$e" kind) || { echo "test-envs.toml: envs.$e.kind is required" >&2; echo "FAIL $e"; failed=1; continue; }
+        case "$kind" in
+            container|ssh|local) ;;
+            *) echo "test-envs.toml: envs.$e.kind must be container, ssh or local" >&2; echo "FAIL $e"; failed=1; continue ;;
+        esac
+        if sh scripts/test-local/"$kind".sh "$e"; then
+            echo "PASS $e"
+        else
+            echo "FAIL $e"
+            failed=1
+        fi
+    done
+    exit "$failed"

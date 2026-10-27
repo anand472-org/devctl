@@ -31,3 +31,20 @@ Dev tools (`just`, the gitoxide CLI) come from [mise](https://mise.jdx.dev), pin
 - fish: `mise activate fish | source`.
 - pwsh, in `$PROFILE`: `mise activate pwsh | Out-String | Invoke-Expression`.
 - Git Bash, in `~/.bashrc`: `export PATH="$(cygpath "$LOCALAPPDATA")/mise/shims:$PATH"`. Don't use `mise activate bash` here: under Git Bash it writes Windows-style paths into `PATH`.
+
+## Local test environments
+
+`just test-local` runs `just ci` on the working tree (including uncommitted and untracked, non-ignored files) in each enabled environment of `test-envs.toml` (restricted TOML, documented in `scripts/test-local/config.sh`; with no file there is one `local` environment). This repo defines three: a podman Ubuntu 24.04 arm64 container, a UTM Windows 11 ARM VM over SSH, and this Mac (arm64, plus the tests again as `x86_64-apple-darwin` under Rosetta). It prints `PASS` or `FAIL` per environment and exits non-zero if any failed. Run one at a time with `just test-local linux`, `just test-local windows` or `just test-local macos`. Environment kinds are `container` (podman), `ssh` (a host alias, optionally with a UTM VM to start) and `local`.
+
+The Linux container needs podman (`brew install podman`, `podman machine init`); the script starts the machine if it is stopped. Named volumes keep the Rust toolchain, mise tools and `target/` between runs, so later runs are incremental.
+
+### Local Windows VM
+
+One-time setup, by hand:
+
+1. `brew install --cask utm`.
+2. In UTM, create a VM named `devctl-win11` from the Windows 11 ARM64 ISO (Microsoft's download page; activation isn't needed): 4 CPUs, 8 GB RAM, 80 GB disk, shared network. Create the user `dev`.
+3. In the VM, run `scripts/test-local/windows-vm-setup.ps1` as Administrator, then reboot. It is idempotent.
+4. On the Mac, add an `~/.ssh/config` entry `Host devctl-win` with the VM's IP, user `dev` and an `IdentityFile`, and put that key's public half in the VM (see the end of the setup script's output).
+
+Done when `ssh devctl-win "just --version"` prints `just 1.59.0`. If `utmctl` or the `devctl-win` host is missing, `just test-local windows` fails with "SSH host devctl-win not reachable".

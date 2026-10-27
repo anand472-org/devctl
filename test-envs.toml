@@ -1,0 +1,20 @@
+# Local test environments for `just test-local`. Restricted TOML: [envs.<name>] tables
+# with string or boolean values. M2 moves this into .devctl.toml and `devctl test`.
+[envs.linux]
+kind          = "container"        # container | ssh | local
+enabled       = true
+containerfile = "scripts/test-local/linux.Containerfile"
+image         = "devctl-test-linux"
+platform      = "linux/arm64"
+
+[envs.windows]
+kind    = "ssh"
+enabled = true
+host    = "devctl-win"             # ~/.ssh/config alias
+vm      = "devctl-win11"           # optional; started with utmctl when set
+workdir = "C:/devctl-work"
+
+[envs.macos]
+kind          = "local"
+enabled       = true
+extra_targets = "x86_64-apple-darwin"   # optional, space-separated; tests re-run per target
