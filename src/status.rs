@@ -4,10 +4,15 @@ use std::fmt::Write as _;
 
 use devctl_store::{Record, Status};
 
-/// Line coverage in percent, or `None` when no line is coverable.
+/// Line coverage in percent rounded once to one decimal (half away from
+/// zero), or `None` when no line is coverable. Both the shown value and the
+/// delta come from this, so they always agree.
 fn percent(r: &Record) -> Option<f64> {
     let t = r.coverage.total;
-    (t.coverable > 0).then(|| f64::from(t.covered) * 100.0 / f64::from(t.coverable))
+    (t.coverable > 0).then(|| {
+        let x = f64::from(t.covered) * 100.0 / f64::from(t.coverable);
+        (x * 10.0).round() / 10.0
+    })
 }
 
 /// `87.3% (+1.2)`, `50.0% (new)` without a previous percentage, or `n/a`
@@ -17,10 +22,9 @@ fn coverage(record: &Record, previous: Option<&Record>) -> String {
         return "n/a".to_string();
     };
     match previous.and_then(percent) {
-        // Round each to the shown precision first, so the delta matches the
-        // numbers a reader compares; `+ 0.0` turns -0.0 into +0.0.
+        // `+ 0.0` turns -0.0 into +0.0.
         Some(prev) => {
-            let delta = ((cur * 10.0).round() - (prev * 10.0).round()) / 10.0 + 0.0;
+            let delta = cur - prev + 0.0;
             format!("{cur:.1}% ({delta:+.1})")
         }
         None => format!("{cur:.1}% (new)"),
@@ -138,6 +142,19 @@ mod tests {
             format_summary(&same, Some(&prev), NOW).contains("  33.3% (+0.0)  "),
             "{}",
             format_summary(&same, Some(&prev), NOW)
+        );
+    }
+
+    #[test]
+    fn value_and_delta_use_the_same_rounding() {
+        // 87.25% shows as 87.3 (half away from zero), and the delta from
+        // 86.0 is computed from the shown 87.3.
+        let cur = rec(349, 400, Status::Ok, NOW);
+        let prev = rec(344, 400, Status::Ok, NOW);
+        assert!(
+            format_summary(&cur, Some(&prev), NOW).contains("  87.3% (+1.3)  "),
+            "{}",
+            format_summary(&cur, Some(&prev), NOW)
         );
     }
 

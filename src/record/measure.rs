@@ -85,12 +85,23 @@ fn utf8(path: &Path) -> Result<&str> {
     })
 }
 
-fn checkout(path: &Path, hex: &str) -> Result<()> {
+/// `core.hooksPath=<devctl dir>/no-hooks`, a directory that does not exist:
+/// the developer's hooks (e.g. a failing `post-checkout`) must not run, or
+/// fail, in the measuring worktree.
+fn no_hooks(ctx: &Ctx) -> Result<String> {
+    let dir = ctx.dirs.root.join("no-hooks");
+    Ok(format!("core.hooksPath={}", utf8(&dir)?))
+}
+
+fn checkout(ctx: &Ctx, path: &Path, hex: &str) -> Result<()> {
+    let hooks = no_hooks(ctx)?;
     git(
         path,
         &[
             "-c",
             "core.longpaths=true",
+            "-c",
+            &hooks,
             "checkout",
             "-q",
             "--detach",
@@ -103,9 +114,12 @@ fn checkout(path: &Path, hex: &str) -> Result<()> {
 
 fn add(ctx: &Ctx, top: &Path, path: &Path, hex: &str) -> Result<()> {
     let target = utf8(path)?;
+    let hooks = no_hooks(ctx)?;
     let args = [
         "-c",
         "core.longpaths=true",
+        "-c",
+        &hooks,
         "worktree",
         "add",
         "--detach",
@@ -126,6 +140,30 @@ fn add(ctx: &Ctx, top: &Path, path: &Path, hex: &str) -> Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Names the measuring worktree's `index.lock` (left by a crashed or still
+/// running git) and how to clear it. It is never deleted automatically.
+fn index_lock_message(path: &Path) -> String {
+    let lock = git(
+        path,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index.lock",
+        ],
+    )
+    .map_or_else(
+        |_| "its index.lock".to_string(),
+        |out| out.trim().to_string(),
+    );
+    format!(
+        "cannot check out in the measuring worktree {}: {lock} exists (another git \
+         process is using it, or one crashed); delete it if no git process is running, \
+         then run `devctl record`",
+        path.display()
+    )
 }
 
 fn remove_dir(path: &Path) -> Result<()> {
@@ -160,10 +198,13 @@ pub fn prepare(ctx: &Ctx, branch: &str, commit: ObjectId) -> Result<PathBuf> {
     let top = main_top(here).with_context(failed)?;
 
     if path.join(".git").is_file() {
-        match checkout(&path, &hex) {
+        match checkout(ctx, &path, &hex) {
             Ok(()) => return Ok(path),
             // A real checkout failure in a healthy worktree.
             Err(e) if is_registered(ctx, &top, &path).with_context(failed)? => {
+                if format!("{e:#}").contains("index.lock") {
+                    return Err(e).with_context(|| index_lock_message(&path));
+                }
                 return Err(e).with_context(failed);
             }
             Err(e) => {
@@ -247,6 +288,51 @@ mod tests {
         std::fs::remove_dir_all(&admin).unwrap();
         let path = prepare(&ctx, "dev", oid(&a)).unwrap();
         assert_eq!(head_of(&t, &path), a);
+    }
+
+    #[test]
+    fn failing_post_checkout_hook_does_not_run() {
+        let t = TestRepo::new();
+        t.write("f", "1\n");
+        let a = t.commit("a");
+        t.write("f", "2\n");
+        let b = t.commit("b");
+        let hook = t.path().join(".git").join("hooks").join("post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        devctl_platform::current().make_executable(&hook).unwrap();
+        let ctx = Ctx::open(t.path(), Box::new(FakePlatform::new())).unwrap();
+        let path = prepare(&ctx, "dev", oid(&a)).unwrap(); // worktree add
+        prepare(&ctx, "dev", oid(&b)).unwrap(); // checkout
+        assert_eq!(head_of(&t, &path), b);
+    }
+
+    #[test]
+    fn stale_index_lock_is_named_in_the_error() {
+        let t = TestRepo::new();
+        t.write("f", "1\n");
+        let a = t.commit("a");
+        t.write("f", "2\n");
+        let b = t.commit("b");
+        let ctx = Ctx::open(t.path(), Box::new(FakePlatform::new())).unwrap();
+        let path = prepare(&ctx, "dev", oid(&a)).unwrap();
+        let lock = t.git_in(
+            &path,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "index.lock",
+            ],
+        );
+        std::fs::write(&lock, "").unwrap();
+        let err = format!("{:#}", prepare(&ctx, "dev", oid(&b)).unwrap_err());
+        assert!(err.contains(&lock), "{err}");
+        assert!(
+            err.contains("delete it if no git process is running"),
+            "{err}"
+        );
+        assert!(Path::new(&lock).exists(), "not deleted automatically");
     }
 
     #[test]
