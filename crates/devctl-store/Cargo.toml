@@ -7,3 +7,14 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror.workspace = true
+redb.workspace = true
+postcard.workspace = true
+ruzstd.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
