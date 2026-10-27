@@ -24,6 +24,9 @@ pub trait Platform: Send + Sync {
     /// Starts `cmd` detached from this process (no console, own process group, null stdio).
     /// Returns its pid.
     ///
+    /// On Windows the child inherits every inheritable handle of the caller, so callers must
+    /// not hold pipes that the parent's reader waits on to see EOF (redirect stdio first).
+    ///
     /// # Errors
     /// If the process cannot be spawned.
     fn spawn_detached(&self, cmd: Command) -> io::Result<u32>;

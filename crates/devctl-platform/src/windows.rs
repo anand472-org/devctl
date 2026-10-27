@@ -8,7 +8,6 @@ use std::process::{Child, Command, Stdio};
 
 use crate::{JustCommand, JustError, Lock, Platform, detect_just, normalize_windows};
 
-const DETACHED_PROCESS: u32 = 0x0000_0008;
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -19,7 +18,10 @@ impl Platform for WindowsPlatform {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+            // Not DETACHED_PROCESS: Windows ignores CREATE_NO_WINDOW when both are given, and
+            // a console-less worker would make every console child it starts (just, git) open
+            // a visible window. CREATE_NO_WINDOW gives it a hidden console they inherit.
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
         Ok(cmd.spawn()?.id())
     }
 
@@ -28,21 +30,32 @@ impl Platform for WindowsPlatform {
         cmd.spawn()
     }
 
+    /// Repeats `taskkill /T /F` (up to 3 passes) because descendants started while a pass walks
+    /// the tree can be missed. "Not found" (exit code 128) is success, like ESRCH on Unix.
+    /// Without a Job Object (needs unsafe) a process that re-parents itself away from the tree
+    /// before `taskkill` sees it cannot be reached.
     fn kill_tree(&self, pid: u32) -> io::Result<()> {
-        let out = Command::new("taskkill")
-            .args(["/T", "/F", "/PID"])
-            .arg(pid.to_string())
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdin(Stdio::null())
-            .output()?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "taskkill /T /F /PID {pid} failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )))
+        const NOT_FOUND: i32 = 128;
+        for _ in 0..3 {
+            let out = Command::new("taskkill")
+                .args(["/T", "/F", "/PID"])
+                .arg(pid.to_string())
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .output()?;
+            match out.status.code() {
+                Some(NOT_FOUND) => return Ok(()),
+                Some(0) => {}
+                _ => {
+                    return Err(io::Error::other(format!(
+                        "taskkill /T /F /PID {pid} failed ({}): {}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    )));
+                }
+            }
         }
+        Ok(())
     }
 
     fn lock(&self, path: &Path) -> io::Result<Lock> {
@@ -54,8 +67,9 @@ impl Platform for WindowsPlatform {
     }
 
     fn open_browser(&self, url: &str) -> io::Result<()> {
-        let status = Command::new("cmd")
-            .args(["/c", "start", ""])
+        // Not through `cmd`: it would interpret `&`, `|`, `^` and `%` in the URL.
+        let status = Command::new("rundll32")
+            .arg("url.dll,FileProtocolHandler")
             .arg(url)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
@@ -65,9 +79,7 @@ impl Platform for WindowsPlatform {
         if status.success() {
             Ok(())
         } else {
-            Err(io::Error::other(format!(
-                "cmd /c start exited with {status}"
-            )))
+            Err(io::Error::other(format!("rundll32 exited with {status}")))
         }
     }
 
@@ -82,7 +94,9 @@ impl Platform for WindowsPlatform {
     }
 
     fn normalize_path(&self, p: &Path) -> String {
-        let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let abs = std::fs::canonicalize(p)
+            .or_else(|_| std::path::absolute(p))
+            .unwrap_or_else(|_| p.to_path_buf());
         normalize_windows(&abs.to_string_lossy())
     }
 

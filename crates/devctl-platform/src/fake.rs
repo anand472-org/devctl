@@ -14,6 +14,7 @@ use crate::{JustCommand, JustError, Lock, Platform, current};
 pub struct SpawnRecord {
     pub program: OsString,
     pub args: Vec<OsString>,
+    pub current_dir: Option<PathBuf>,
     /// Environment changes as set on the command (`None` means removed).
     pub envs: Vec<(OsString, Option<OsString>)>,
 }
@@ -66,6 +67,7 @@ impl Platform for FakePlatform {
         let record = SpawnRecord {
             program: cmd.get_program().to_owned(),
             args: cmd.get_args().map(ToOwned::to_owned).collect(),
+            current_dir: cmd.get_current_dir().map(Path::to_path_buf),
             envs: cmd
                 .get_envs()
                 .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
@@ -123,13 +125,15 @@ mod tests {
     fn records_spawn_detached_without_spawning() {
         let fake = FakePlatform::new();
         let mut cmd = Command::new("/definitely/not/a/program");
-        cmd.arg("--flag")
+        cmd.current_dir("/tmp/wd")
+            .arg("--flag")
             .env("DEVCTL_X", "1")
             .env_remove("DEVCTL_Y");
         let pid = fake.spawn_detached(cmd).unwrap();
         let rec = fake.spawned();
         assert_eq!(rec.len(), 1);
         assert_eq!(rec[0].program, "/definitely/not/a/program");
+        assert_eq!(rec[0].current_dir, Some(PathBuf::from("/tmp/wd")));
         assert_eq!(rec[0].args, vec![OsString::from("--flag")]);
         assert!(rec[0].envs.contains(&("DEVCTL_X".into(), Some("1".into()))));
         assert!(rec[0].envs.contains(&("DEVCTL_Y".into(), None)));

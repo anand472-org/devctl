@@ -35,6 +35,7 @@ impl Platform for UnixPlatform {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
+        // process_group(0) is enough: no controlling-terminal signals reach a new group.
         // The child is intentionally not waited on; it outlives this process.
         Ok(cmd.spawn()?.id())
     }
@@ -95,7 +96,9 @@ impl Platform for UnixPlatform {
     }
 
     fn normalize_path(&self, p: &Path) -> String {
-        let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let abs = std::fs::canonicalize(p)
+            .or_else(|_| std::path::absolute(p))
+            .unwrap_or_else(|_| p.to_path_buf());
         normalize_unix(&abs.to_string_lossy())
     }
 
@@ -126,6 +129,25 @@ mod tests {
             Some(PathBuf::from("/home/u/.local/share/devctl"))
         );
         assert_eq!(data_dir_from(false, None, None), None);
+    }
+
+    #[test]
+    fn normalize_path_resolves_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(
+            UnixPlatform.normalize_path(dir.path()),
+            UnixPlatform.normalize_path(&canon)
+        );
+        assert_eq!(
+            UnixPlatform.normalize_path(dir.path()),
+            canon.to_string_lossy()
+        );
+        let missing = dir.path().join("no").join("..").join("file.txt");
+        assert_eq!(
+            UnixPlatform.normalize_path(&missing),
+            format!("{}/file.txt", dir.path().to_string_lossy())
+        );
     }
 
     #[test]
