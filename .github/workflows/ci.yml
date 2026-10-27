@@ -18,7 +18,21 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - windows-11-arm
+          - macos-15-intel
+          - macos-latest
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -27,28 +41,19 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install
 
-      # Dev tools are pinned in .cargo/config.toml, so the cache key changes with them.
-      # Restore and save are split so a fresh build is cached even if later steps fail.
-      - name: Restore dev tools
-        id: tools-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .tools
-          key: tools-${{ runner.os }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain.toml') }}
-
+      # Dev tools are pinned in mise.toml and mise.lock.
       - name: Install dev tools
-        if: steps.tools-cache.outputs.cache-hit != 'true'
-        run: cargo install-just && cargo install-gix
-
-      - name: Save dev tools
-        if: steps.tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: jdx/mise-action@v3
         with:
-          path: .tools
-          key: ${{ steps.tools-cache.outputs.cache-primary-key }}
+          version: 2026.8.16
+          install: true
+          cache: true
+        env:
+          MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
 
-      - name: Add dev tools to PATH
-        run: echo "$GITHUB_WORKSPACE/.tools/bin" >> "$GITHUB_PATH"
+      # For the tests that build fixture git repositories.
+      - name: Configure git identity
+        run: git config --global user.name ci && git config --global user.email ci@example.invalid
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

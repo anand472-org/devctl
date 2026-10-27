@@ -1,8 +1,0 @@
-# Repo-local dev tools, installed into .tools/bin. Run from the repo root
-# (`--root` is relative to the current directory; cargo ignores `install.root`
-# from this file):
-#   cargo install-just && cargo install-gix
-[alias]
-install-just = "install --locked --root .tools just@1.59.0"
-# gitoxide CLI (`gix`, `ein`), built pure-Rust without curl/OpenSSL.
-install-gix = "install --locked --root .tools gitoxide@0.61.0 --no-default-features --features max-pure"

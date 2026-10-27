@@ -32,6 +32,7 @@ Decisions from the design discussion. Where they differ from the plan, the plan 
 | Threshold | 95% new-code line coverage by default | Workbook target was 80% |
 | Hooks | `post-commit` and `pre-push` only | — |
 | Telemetry | OpenTelemetry logs, traces and metrics built in from M1; export off by default | New |
+| Dev tools | mise (`mise.toml` + `mise.lock`); Rust via rustup | New |
 
 **Consequence for this repo:** PRs into `dev` and `master` must land without merge commits. Set GitHub's merge setting to "Rebase and merge" (or squash), or finish branches with `devctl feature finish`, which fast-forwards.
 
@@ -225,7 +226,7 @@ Values are serialized with serde + `postcard`.
 
 ### 7.4 M1 exit criteria
 
-On Windows, Linux and macOS, in CI:
+On Windows, Linux and macOS, each on x64 and arm64, in CI:
 
 - A commit is recorded in the background and shown by `devctl status`.
 - `pre-push` blocks each of: a bad branch name, a force push to `dev`, a merge commit pushed to `dev`, a failed test, new-code coverage below 95%, and a record error. A compliant push passes.
