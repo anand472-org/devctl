@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::trace::{TraceContextExt, TracerProvider};
@@ -25,7 +25,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{Builder, Rotation};
 use tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer, OpenTelemetrySpanExt};
 use tracing_subscriber::Registry;
-use tracing_subscriber::filter::{EnvFilter, FilterExt, filter_fn};
+use tracing_subscriber::filter::{EnvFilter, FilterExt, LevelFilter, filter_fn};
 use tracing_subscriber::layer::{Layer, SubscriberExt};
 
 use crate::config::TelemetryCfg;
@@ -37,17 +37,20 @@ pub const PATH_TARGET: &str = "devctl::paths";
 /// Number of daily log files kept per process.
 const MAX_LOG_FILES: usize = 7;
 
-/// Targets that must never feed the log bridge: the export path itself would
-/// otherwise generate events about exporting.
-const EXPORT_INTERNALS: [&str; 7] = [
-    "opentelemetry",
-    "hyper",
-    "hyper_util",
-    "reqwest",
-    "h2",
-    "tower",
-    "tonic",
-];
+/// Crates whose events must never reach the export layers: the export path
+/// itself would otherwise report on exporting, in a loop. Everything starting
+/// with `opentelemetry` (`opentelemetry_sdk`, `opentelemetry-otlp`, ...) is also
+/// excluded.
+const EXPORT_INTERNALS: [&str; 5] = ["reqwest", "hyper", "hyper_util", "h2", "tower"];
+
+fn is_export_internal(target: &str) -> bool {
+    target.starts_with("opentelemetry")
+        || EXPORT_INTERNALS.iter().any(|t| {
+            target
+                .strip_prefix(t)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+        })
+}
 
 /// What [`init`] needs to know.
 pub struct Settings<'a> {
@@ -85,26 +88,45 @@ impl Drop for Guard {
             return;
         };
         let timeout = self.flush_timeout;
-        let (tx, rx) = mpsc::channel();
-        let spawned = std::thread::Builder::new()
-            .name("devctl-telemetry-flush".into())
-            .spawn(move || {
-                // Each shutdown flushes first. Errors cannot be acted on here.
+        let (tx, rx) = mpsc::channel::<()>();
+        // One thread per provider so a hanging one cannot starve the others.
+        // Each shutdown flushes first; errors cannot be acted on here.
+        let jobs: [Box<dyn FnOnce() + Send>; 3] = [
+            Box::new(move || {
                 let _ = e.tracer.shutdown_with_timeout(timeout);
+            }),
+            Box::new(move || {
                 let _ = e.logger.shutdown_with_timeout(timeout);
+            }),
+            Box::new(move || {
                 let _ = e.meter.shutdown_with_timeout(timeout);
-                let _ = tx.send(());
-            });
-        match spawned {
-            Ok(_) => {
-                if rx.recv_timeout(timeout).is_err() {
-                    tracing::warn!(
-                        timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                        "telemetry flush timed out; abandoning unsent data"
-                    );
-                }
+            }),
+        ];
+        let mut started = 0;
+        for job in jobs {
+            let tx = tx.clone();
+            let spawned = std::thread::Builder::new()
+                .name("devctl-telemetry-flush".into())
+                .spawn(move || {
+                    job();
+                    let _ = tx.send(());
+                });
+            match spawned {
+                Ok(_) => started += 1,
+                Err(err) => tracing::warn!("could not start telemetry flush thread: {err}"),
             }
-            Err(err) => tracing::warn!("could not start telemetry flush thread: {err}"),
+        }
+        drop(tx);
+        let deadline = Instant::now() + timeout;
+        for _ in 0..started {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if rx.recv_timeout(left).is_err() {
+                tracing::warn!(
+                    timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                    "telemetry flush timed out; abandoning unsent data"
+                );
+                break;
+            }
         }
     }
 }
@@ -176,27 +198,27 @@ pub fn build_with(s: &Settings, exporters: Option<Exporters>) -> (tracing::Dispa
 
     if let Some(e) = &exporters {
         let include_paths = s.cfg.include_paths;
-        let export_filter = || {
-            env_filter(&s.cfg.log_level).and(filter_fn(move |m| {
-                (include_paths || m.target() != PATH_TARGET)
-                    && !EXPORT_INTERNALS
-                        .iter()
-                        .any(|t| m.target() == *t || m.target().starts_with(&format!("{t}::")))
-            }))
+        // Path and internals filtering applies to every export layer.
+        let export_filter = move || {
+            filter_fn(move |m| {
+                (include_paths || m.target() != PATH_TARGET) && !is_export_internal(m.target())
+            })
         };
+        // `log_level` governs the log bridge only: spans and metric events export
+        // at info and above regardless, so counters survive `log_level = "warn"`.
         layers.push(
             OpenTelemetryLayer::new(e.tracer.tracer("devctl"))
-                .with_filter(export_filter())
+                .with_filter(export_filter().and(LevelFilter::INFO))
                 .boxed(),
         );
         layers.push(
             OpenTelemetryTracingBridge::new(&e.logger)
-                .with_filter(export_filter())
+                .with_filter(env_filter(&s.cfg.log_level).and(export_filter()))
                 .boxed(),
         );
         layers.push(
             MetricsLayer::new(e.meter.clone())
-                .with_filter(export_filter())
+                .with_filter(export_filter().and(LevelFilter::INFO))
                 .boxed(),
         );
     }
@@ -591,5 +613,87 @@ mod tests {
             t.elapsed()
         );
         drop(l);
+    }
+
+    #[test]
+    fn export_internals_do_not_reach_log_exporter() {
+        let c = cfg("", false);
+        let s = settings(&c, None);
+        let (m, e) = mem(&s);
+        let (dispatch, guard) = build_with(&s, Some(e));
+        tracing::dispatcher::with_default(&dispatch, || {
+            info!(target: "opentelemetry_sdk", "internal");
+            info!(target: "opentelemetry-otlp", "internal");
+            info!(target: "hyper_util::client", "internal");
+            info!(target: "reqwest::connect", "internal");
+            info!("kept");
+        });
+        let logs = m.logs.get_emitted_logs().unwrap();
+        drop(guard);
+        assert_eq!(logs.len(), 1, "{:?}", logs.len());
+    }
+
+    #[test]
+    fn log_level_governs_logs_not_spans_or_metrics() {
+        let mut c = cfg("", false);
+        c.log_level = "warn".to_string();
+        let s = settings(&c, None);
+        let (m, e) = mem(&s);
+        let (dispatch, guard) = build_with(&s, Some(e));
+        tracing::dispatcher::with_default(&dispatch, || {
+            info_span!("work").in_scope(|| {
+                info!(monotonic_counter.devctl.worker.cancelled = 1_u64);
+                info!("info log");
+                tracing::warn!("warn log");
+            });
+        });
+        assert_eq!(m.spans.get_finished_spans().unwrap().len(), 1);
+        assert_eq!(m.logs.get_emitted_logs().unwrap().len(), 1);
+        drop(guard);
+        let finished = m.metrics.get_finished_metrics().unwrap();
+        assert!(
+            finished
+                .iter()
+                .flat_map(opentelemetry_sdk::metrics::data::ResourceMetrics::scope_metrics)
+                .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
+                .any(|x| x.name() == "devctl.worker.cancelled")
+        );
+    }
+
+    #[test]
+    fn drop_flushes_other_providers_when_one_hangs() {
+        use opentelemetry_sdk::error::OTelSdkResult;
+        use opentelemetry_sdk::trace::{SpanData, SpanExporter};
+        #[derive(Debug)]
+        struct Hang;
+        impl SpanExporter for Hang {
+            fn export(&self, _b: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> {
+                std::future::ready(Ok(()))
+            }
+            fn shutdown_with_timeout(&self, _t: Duration) -> OTelSdkResult {
+                std::thread::sleep(Duration::from_secs(30));
+                Ok(())
+            }
+        }
+        let c0 = cfg("", false);
+        let mut s = settings(&c0, None);
+        s.flush_timeout = Duration::from_millis(500);
+        let (mem_out, mut exp) = mem(&s);
+        exp.tracer = SdkTracerProvider::builder()
+            .with_simple_exporter(Hang)
+            .build();
+        let (dispatch, guard) = build_with(&s, Some(exp));
+        tracing::dispatcher::with_default(&dispatch, || {
+            info_span!("x").in_scope(|| info!(monotonic_counter.devctl.worker.cancelled = 1_u64));
+        });
+        let start = Instant::now();
+        drop(guard);
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            start.elapsed()
+        );
+        // Metrics were still flushed even though tracing hung.
+        assert!(!mem_out.metrics.get_finished_metrics().unwrap().is_empty());
     }
 }
