@@ -6,6 +6,7 @@ use std::io::Read as _;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::HookName;
+use crate::commit_size;
 use crate::ctx::Ctx;
 use crate::gate::{self, GateReport};
 use crate::{Process, in_session};
@@ -38,7 +39,20 @@ pub fn run_hook(name: HookName, args: &[String]) -> Result<()> {
             }
             Ok(())
         }
-        HookName::PostCommit | HookName::PreCommit => bail!(
+        HookName::PreCommit => {
+            let process = Process::Hook(name.as_str().to_string());
+            let allowed = in_session(
+                &process,
+                || tracing::info_span!("hook", name = name.as_str()),
+                commit_size::run_pre_commit,
+            )
+            .context("the pre-commit size check could not run, so the commit is blocked")?;
+            if !allowed {
+                bail!("commit blocked by devctl; split it as listed above, then commit again");
+            }
+            Ok(())
+        }
+        HookName::PostCommit => bail!(
             "hook `{}` is not available in this build; upgrade devctl, or remove the hook \
              from .git/hooks",
             name.as_str()

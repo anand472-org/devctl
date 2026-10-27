@@ -30,7 +30,7 @@ Decisions from the design discussion. Where they differ from the plan, the plan 
 | New code | Lines added since the branch split from its target branch; on `dev`/`master`, the commits being pushed | — |
 | Gate | Blocks on: non-compliant branch name, rewrite of or merge commit into a protected branch, any failed test, new-code coverage below threshold, record error | Adds failed tests and branch names |
 | Threshold | 95% new-code line coverage by default | Workbook target was 80% |
-| Hooks | `post-commit` and `pre-push` only | — |
+| Hooks | `pre-commit`, `post-commit` and `pre-push` | `pre-commit` added: size check |
 | Telemetry | OpenTelemetry logs, traces and metrics built in from M1; export off by default | New |
 | Dev tools | mise (`mise.toml` + `mise.lock`); Rust via rustup | New |
 
@@ -41,6 +41,7 @@ Decisions from the design discussion. Where they differ from the plan, the plan 
 No daemon. Every `devctl` process is short-lived:
 
 ```
+git commit ──► pre-commit hook ──► devctl hook pre-commit ──► size rule ──► allow / block
 git commit ──► post-commit hook ──► devctl hook post-commit ──► queue job, spawn detached worker ──► exit
                                                                        │
                                      devctl worker ◄───────────────────┘
@@ -167,6 +168,10 @@ targets   = { feature = "dev", bugfix = "dev", release = "master", hotfix = "mas
 [gate]
 new_code_coverage = 95        # percent, 0–100
 
+[commit]
+max_files = 10                # files changed, at most
+max_lines = 500               # added + removed, must be under
+
 [record]
 timeout_minutes = 30
 
@@ -191,7 +196,7 @@ A missing file means all defaults. An invalid file stops every command with the 
 | `devctl record [--commit <rev>]` | Records a commit (default `HEAD`) in the foreground in its branch's measuring worktree and prints the summary |
 | `devctl status [--branch <b>]` | Last record per branch: commit, status, line coverage, change vs the previous record, test counts, age; whether a worker is running |
 | `devctl gate [--target <branch>]` | Runs the pre-push rules for the current branch tip without pushing |
-| `devctl hooks install` | Writes `post-commit` and `pre-push` scripts that call `devctl hook <name>`. If a hook already exists or `core.hooksPath` is set, it stops and prints the line to add to the existing hook |
+| `devctl hooks install` | Writes `pre-commit`, `post-commit` and `pre-push` scripts that call `devctl hook <name>`. If a hook already exists or `core.hooksPath` is set, it stops and prints the line to add to the existing hook |
 | `devctl hook <name>` | Hidden; called by hooks |
 | `devctl worker --branch <b>` | Hidden; the background worker |
 | `devctl version` | Existing |
@@ -219,6 +224,7 @@ Values are serialized with serde + `postcard`.
 ### 7.3 Error handling
 
 - `post-commit` never fails. Problems go to the logs and to an `error` record, shown by `devctl status`.
+- `pre-commit` fails closed: an unreadable index or an invalid `.devctl.toml` blocks the commit with the reason. It is skipped while a merge is in progress.
 - `pre-push` fails closed: a record error, missing `just`, a missing recipe or an unreadable store blocks the push with a specific message and fix.
 - A recipe that exceeds `record.timeout_minutes` has its process tree killed (`Platform::kill_tree`) and is stored as `error`.
 - A corrupt store is reported with its path. It's a local cache: deleting it and recording again is the fix.
@@ -229,6 +235,7 @@ Values are serialized with serde + `postcard`.
 On Windows, Linux and macOS, each on x64 and arm64, in CI:
 
 - A commit is recorded in the background and shown by `devctl status`.
+- `pre-commit` blocks a commit of more than 10 files or 500 or more changed lines (added + removed); `git commit --no-verify` bypasses it.
 - `pre-push` blocks each of: a bad branch name, a force push to `dev`, a merge commit pushed to `dev`, a failed test, new-code coverage below 95%, and a record error. A compliant push passes.
 - A message-only amend reuses the previous record. A second commit during a run cancels the first.
 - `cfg(target_os)` appears only in `devctl-platform`.
