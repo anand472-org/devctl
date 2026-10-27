@@ -163,11 +163,13 @@ impl Builder {
         empty: bool,
     ) -> Result<(), ParseError> {
         let parent_is_case = matches!(self.stack.last(), Some(Open::Case));
-        let parent_is_other = matches!(self.stack.last(), Some(Open::Other(_)));
+        let in_case = self.stack.iter().any(|o| matches!(o, Open::Case));
+        // Everything below a testcase is opaque except its direct status children.
+        let opaque = in_case && !parent_is_case;
         let local = e.local_name();
         let local = local.as_ref();
         let other = || Open::Other(e.name().as_ref().to_owned());
-        let open = if parent_is_other {
+        let open = if opaque {
             other()
         } else {
             match local {
@@ -175,7 +177,7 @@ impl Builder {
                     self.seen = true;
                     Open::Suites
                 }
-                "testsuite" => {
+                "testsuite" if !in_case => {
                     self.seen = true;
                     let a = read_attrs(e, reader)?;
                     self.suites.push(Suite {
@@ -185,7 +187,7 @@ impl Builder {
                     self.suite_idx.push(self.suites.len() - 1);
                     Open::Suite
                 }
-                "testcase" if !parent_is_case => {
+                "testcase" if !in_case => {
                     self.seen = true;
                     let a = read_attrs(e, reader)?;
                     let idx = self.target_suite();
@@ -258,6 +260,8 @@ impl Builder {
 /// that failed every rerun also carries a `<failure>`/`<error>` child).
 ///
 /// `time` is in seconds, may be a float and may contain thousands separators.
+/// Decimal-comma durations (`0,5`) are unsupported: the comma is read as a
+/// thousands separator, so `0,5` is 5 seconds.
 /// A missing or malformed `time` counts as zero and never fails the parse.
 ///
 /// # Errors
